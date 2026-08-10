@@ -3,8 +3,6 @@ Consolidated helper functions for cricket scorecard data extraction.
 Handles various API response shapes and data inconsistencies.
 """
 
-from bs4 import BeautifulSoup
-
 
 def get_nested(d, path, default="-"):
     """
@@ -32,6 +30,9 @@ def html_to_text(html):
     """
     Convert HTML to plain text using BeautifulSoup.
 
+    BeautifulSoup is imported lazily so the scorecard path, which never
+    touches HTML, works without beautifulsoup4 installed.
+
     Args:
         html: HTML string
 
@@ -40,6 +41,9 @@ def html_to_text(html):
     """
     if not html:
         return ""
+
+    from bs4 import BeautifulSoup
+
     return BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
 
 
@@ -343,6 +347,33 @@ def get_fow_player(w):
     )
 
 
+def dismissal_text(value):
+    """
+    Normalize a dismissal field to a plain string.
+
+    Cricinfo returns dismissalText either as a string or as a dict with
+    short/long/commentary variants; the long form reads best in a scorecard.
+
+    Args:
+        value: String, dict, or None
+
+    Returns:
+        Dismissal string ("" if unavailable)
+    """
+    if not value:
+        return ""
+
+    if isinstance(value, dict):
+        return (
+            value.get("long")
+            or value.get("commentary")
+            or value.get("short")
+            or ""
+        )
+
+    return str(value)
+
+
 def extract_fow(inn):
     """
     Reconstruct Fall of Wickets from innings data.
@@ -402,12 +433,11 @@ def extract_fow(inn):
         if batter == "Unknown":
             batter = get_fow_player(fow)
 
-        dismissal = (
+        dismissal = dismissal_text(
             wicket.get("dismissalText")
             or wicket.get("dismissalComment")
             or fow.get("dismissalText")
             or fow.get("dismissalComment")
-            or ""
         )
 
         results.append(
