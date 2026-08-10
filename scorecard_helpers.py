@@ -451,3 +451,270 @@ def extract_fow(inn):
         )
 
     return results
+
+
+# ----------------------------------------------------------------------
+# Innings analytics — all served by the same cached scorecard fetch
+#
+# cricdata caches the scorecard page per (series_slug, match_slug), so
+# match_scorecard / match_info / match_overs / match_partnerships /
+# match_fall_of_wickets all share one HTTP request. Everything below reads
+# that same payload and therefore costs nothing extra.
+# ----------------------------------------------------------------------
+
+PHASE_LABELS = {
+    "POWERPLAY": "Powerplay",
+    "MIDDLE_OVERS": "Middle",
+    "FINAL_OVERS": "Death",
+}
+
+
+def short_name(player, default="?"):
+    """
+    Extract a surname-style short name for tight layouts.
+
+    Cricinfo supplies fieldingName ("Narine") alongside name ("SP Narine"),
+    which is what chart labels want. Falls back to the last token.
+
+    Args:
+        player: Player dict
+        default: Fallback when nothing usable is present
+
+    Returns:
+        Short name string
+    """
+    if not isinstance(player, dict):
+        return default
+
+    short = player.get("fieldingName") or player.get("mobileName")
+    if short:
+        return short
+
+    full = player.get("name") or player.get("longName")
+    if full:
+        return full.split()[-1]
+
+    return default
+
+
+def innings_team_name(inn, default="Unknown Team"):
+    """
+    Extract the batting team's short name for an innings.
+
+    Args:
+        inn: Innings record
+        default: Fallback when no name is present
+
+    Returns:
+        Team abbreviation or name
+    """
+    team = inn.get("team") or {}
+    return (
+        team.get("abbreviation")
+        or team.get("name")
+        or team.get("longName")
+        or default
+    )
+
+
+def over_series(inn):
+    """
+    Flatten an innings' over-by-over progression.
+
+    Args:
+        inn: Innings record
+
+    Returns:
+        List of dicts with over, runs, wickets, total_runs, total_wickets,
+        run_rate, required_runs, required_rate, balls_left, win_prob,
+        projected
+    """
+    rows = []
+    for ov in inn.get("inningOvers", []) or []:
+        pred = ov.get("predictions") or {}
+        rows.append(
+            {
+                "over": ov.get("overNumber"),
+                "runs": ov.get("overRuns"),
+                "wickets": ov.get("overWickets"),
+                "total_runs": ov.get("totalRuns"),
+                "total_wickets": ov.get("totalWickets"),
+                "run_rate": ov.get("overRunRate"),
+                "required_runs": ov.get("requiredRuns"),
+                "required_rate": ov.get("requiredRunRate"),
+                "balls_left": ov.get("remainingBalls"),
+                "win_prob": pred.get("winProbability"),
+                "projected": pred.get("score"),
+            }
+        )
+
+    # Cricinfo returns overs newest-first on live matches.
+    rows.sort(key=lambda r: r["over"] if r["over"] is not None else 0)
+    return rows
+
+
+def win_prob_series(innings_list, team_name):
+    """
+    Build a match-long win-probability curve for one team.
+
+    Cricinfo reports winProbability for whichever team is BATTING in that
+    innings. Verified on a completed match: the chasing side's innings ends
+    at 100 and the side that lost ends its own innings well under 50. So to
+    follow a single team across the whole match, the innings where they
+    bowled must be inverted.
+
+    Args:
+        innings_list: scorecard["content"]["innings"]
+        team_name: Team to track, matched against innings_team_name()
+
+    Returns:
+        List of percentages for that team, in match order
+    """
+    series = []
+    for inn in innings_list:
+        batting = innings_team_name(inn)
+        for row in over_series(inn):
+            wp = row["win_prob"]
+            if wp is None:
+                series.append(None)
+            elif batting == team_name:
+                series.append(wp)
+            else:
+                series.append(100.0 - wp)
+
+    return series
+
+
+def phase_splits(inn):
+    """
+    Powerplay / middle / death aggregates for an innings.
+
+    Reads inningOverGroups, which Cricinfo pre-aggregates — no need to
+    bucket overs by hand.
+
+    Args:
+        inn: Innings record
+
+    Returns:
+        List of dicts with name, start_over, end_over, runs, wickets
+    """
+    phases = []
+    for g in inn.get("inningOverGroups", []) or []:
+        raw = g.get("type") or ""
+        phases.append(
+            {
+                "name": PHASE_LABELS.get(raw, raw.replace("_", " ").title()),
+                "start_over": g.get("startOverNumber"),
+                "end_over": g.get("endOverNumber"),
+                # oversRuns is this phase alone; totalRuns is cumulative.
+                "runs": g.get("oversRuns") or 0,
+                "wickets": g.get("oversWickets") or 0,
+            }
+        )
+
+    return phases
+
+
+def partnership_rows(inn):
+    """
+    Normalize an innings' partnerships.
+
+    Args:
+        inn: Innings record
+
+    Returns:
+        List of dicts with runs, balls, overs, both players' names and
+        contributions, and is_live
+    """
+    rows = []
+    for p in inn.get("inningPartnerships", []) or []:
+        p1 = p.get("player1") or {}
+        p2 = p.get("player2") or {}
+
+        rows.append(
+            {
+                "runs": p.get("runs") or 0,
+                "balls": p.get("balls") or 0,
+                "overs": p.get("overs"),
+                "player1": p1.get("longName") or p1.get("name") or "?",
+                "player2": p2.get("longName") or p2.get("name") or "?",
+                "player1_short": short_name(p1),
+                "player2_short": short_name(p2),
+                "player1_runs": p.get("player1Runs") or 0,
+                "player1_balls": p.get("player1Balls") or 0,
+                "player2_runs": p.get("player2Runs") or 0,
+                "player2_balls": p.get("player2Balls") or 0,
+                "is_live": bool(p.get("isLive")),
+            }
+        )
+
+    return rows
+
+
+def cumulative_runs(inn):
+    """
+    Cumulative run total after each over, for worm charts.
+
+    Args:
+        inn: Innings record
+
+    Returns:
+        List of running totals
+    """
+    return [
+        r["total_runs"] for r in over_series(inn) if r["total_runs"] is not None
+    ]
+
+
+def chase_state(inn):
+    """
+    Chase requirement from the final recorded over of an innings.
+
+    Args:
+        inn: Innings record
+
+    Returns:
+        Dict with required_runs, balls_left, required_rate — or None when the
+        innings is not a chase
+    """
+    rows = over_series(inn)
+    if not rows:
+        return None
+
+    last = rows[-1]
+    if not last.get("required_runs"):
+        return None
+
+    return {
+        "required_runs": last["required_runs"],
+        "balls_left": last["balls_left"],
+        "required_rate": last["required_rate"],
+    }
+
+
+def player_of_match(scorecard):
+    """
+    Extract the Player of the Match name.
+
+    Args:
+        scorecard: match_scorecard response
+
+    Returns:
+        Player name, or None when unavailable
+    """
+    content = scorecard.get("content", {}) or {}
+    support = content.get("supportInfo") or {}
+
+    candidates = (
+        support.get("playersOfTheMatch")
+        or content.get("matchPlayerAwards")
+        or []
+    )
+
+    for entry in candidates:
+        name = player_name(entry, default=None)
+        if name:
+            return name
+
+    return None
+

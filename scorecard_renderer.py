@@ -12,6 +12,21 @@ from scorecard_helpers import (
     get_match_result,
     get_match_ground,
     extract_fow,
+    innings_team_name,
+    over_series,
+    phase_splits,
+    partnership_rows,
+    win_prob_series,
+    cumulative_runs,
+    chase_state,
+    player_of_match,
+)
+from scorecard_charts import (
+    manhattan,
+    phase_table,
+    partnership_bars,
+    win_probability,
+    worm,
 )
 
 
@@ -33,38 +48,61 @@ def format_number(value):
 def truncate_at_limit(text, max_chars=1900):
     """
     Truncate text to max_chars, respecting line boundaries.
-    Append "…" if truncated.
+
+    Cutting inside a ``` block would leave the fence unclosed and break
+    rendering for everything after it, so an odd fence count is balanced by
+    appending a closing fence — and the budget reserves room for it.
 
     Args:
         text: Full text
         max_chars: Character limit
 
     Returns:
-        Truncated text string
+        Truncated text string, never longer than max_chars
     """
     if len(text) <= max_chars:
         return text
 
-    # Try to cut at a line break near the limit
-    lines = text[:max_chars].split("\n")
+    # Reserve room for the ellipsis line and a possible closing fence.
+    budget = max(0, max_chars - 6)
+
+    lines = text[:budget].split("\n")
     if len(lines) > 1:
-        # Remove last line (likely incomplete) and rejoin
         result = "\n".join(lines[:-1]) + "\n…"
     else:
-        result = text[:max_chars - 1] + "…"
+        result = text[:budget] + "…"
+
+    if result.count("```") % 2:
+        result += "\n```"
 
     return result
 
 
-def build_compact_scorecard(info, scorecard, top_n=3, max_chars=1900):
+def build_compact_scorecard(
+    info,
+    scorecard,
+    top_n=3,
+    max_chars=1900,
+    phases=False,
+    charts=False,
+    partnerships=False,
+    fow=True,
+):
     """
     Build a compact match scorecard optimized for Discord/Telegram.
+
+    All optional sections read the same cached scorecard payload, so enabling
+    them costs no extra HTTP requests.
 
     Args:
         info: match_info response
         scorecard: match_scorecard response
         top_n: Number of top batters/bowlers to show (default 3 for brevity)
-        max_chars: Character limit; truncate FOW if needed (default 1900)
+        max_chars: Character limit; output is truncated to fit (default 1900)
+        phases: Include powerplay/middle/death splits
+        charts: Include the runs-per-over manhattan sparkline
+        partnerships: Include the biggest stands as bars
+        fow: Include fall of wickets (default True)
 
     Returns:
         Compact scorecard string
@@ -85,11 +123,7 @@ def build_compact_scorecard(info, scorecard, top_n=3, max_chars=1900):
     innings_list = scorecard.get("content", {}).get("innings", [])
 
     for inn in innings_list:
-        team = (
-            inn.get("team", {}).get("abbreviation")
-            or inn.get("team", {}).get("name")
-            or "Unknown Team"
-        )
+        team = innings_team_name(inn)
         runs = format_number(inn.get("runs"))
         wickets = format_number(inn.get("wickets"))
         overs = format_number(inn.get("overs"))
@@ -165,25 +199,92 @@ def build_compact_scorecard(info, scorecard, top_n=3, max_chars=1900):
                     f"in {bowler_overs} overs, E:{economy}"
                 )
 
+        # Phase splits (powerplay / middle / death)
+        if phases:
+            split = phase_splits(inn)
+            if split:
+                lines.append("")
+                lines.append("Phases:")
+                lines.append("```")
+                lines.append(phase_table(split))
+                lines.append("```")
+
+        # Runs-per-over manhattan
+        if charts:
+            overs = over_series(inn)
+            if overs:
+                lines.append("")
+                lines.append(f"Runs/over (1-{len(overs)}):")
+                lines.append("```")
+                lines.append(manhattan(overs))
+                lines.append("```")
+
+        # Biggest stands
+        if partnerships:
+            stands = partnership_rows(inn)
+            if stands:
+                lines.append("")
+                lines.append("Top stands:")
+                lines.append("```")
+                lines.append(partnership_bars(stands, top_n=top_n))
+                lines.append("```")
+
+        # Live chase requirement, when this innings is an unfinished chase
+        state = chase_state(inn)
+        if state:
+            lines.append("")
+            lines.append(
+                f"Need {state['required_runs']} off {state['balls_left']} "
+                f"(RRR {state['required_rate']})"
+            )
+
         # Fall of wickets
-        fow = extract_fow(inn)
+        if fow:
+            wickets_fallen = extract_fow(inn)
+
+            lines.append("")
+            lines.append("Fall of wickets:")
+
+            if not wickets_fallen:
+                lines.append("- No fall-of-wickets data available")
+            else:
+                for w in wickets_fallen:
+                    line = (
+                        f"- {w['score']}/{w['wicket']} "
+                        f"at {w['overs']} overs — {w['batter']}"
+                    )
+
+                    if w["dismissal"]:
+                        line += f" ({w['dismissal']})"
+
+                    lines.append(line)
+
+    # Match-wide extras
+    potm = player_of_match(scorecard)
+    if potm:
+        lines.append("")
+        lines.append(f"Player of the Match: {potm}")
+
+    if charts and len(innings_list) >= 2:
+        first_team = innings_team_name(innings_list[0])
+        curve = win_prob_series(innings_list, first_team)
+        if any(p is not None for p in curve):
+            lines.append("")
+            lines.append(f"Win% {first_team} (whole match):")
+            lines.append("```")
+            lines.append(win_probability(curve))
+            lines.append("```")
 
         lines.append("")
-        lines.append("Fall of wickets:")
-
-        if not fow:
-            lines.append("- No fall-of-wickets data available")
-        else:
-            for w in fow:
-                line = (
-                    f"- {w['score']}/{w['wicket']} "
-                    f"at {w['overs']} overs — {w['batter']}"
-                )
-
-                if w["dismissal"]:
-                    line += f" ({w['dismissal']})"
-
-                lines.append(line)
+        lines.append("Runs worm:")
+        lines.append("```")
+        lines.append(
+            worm(
+                [cumulative_runs(i) for i in innings_list],
+                labels=[innings_team_name(i) for i in innings_list],
+            )
+        )
+        lines.append("```")
 
     # Join and truncate
     result_text = "\n".join(lines)
