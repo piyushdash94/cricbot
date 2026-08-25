@@ -49,11 +49,11 @@ there is no transport, no command router, and no hosting config in here yet.
 Python 3.10+ (required by `cricdata`).
 
 ```bash
-pip install cricdata
-pip install beautifulsoup4   # optional — only for commentary parsing
+pip install -r requirements.txt
 ```
 
-Then drop the modules in your project root, or import them from a clone.
+`beautifulsoup4` is imported lazily and is only needed for commentary
+parsing — the scorecard path works without it.
 
 ## Quick start
 
@@ -107,8 +107,10 @@ innings or raise `max_chars`.
 | `scorecard_charts.py` | Block-character charts (stdlib only) |
 | `scorecard_renderer.py` | `build_compact_scorecard()` — the main entry point |
 | `cricbot_views.py` | Live scores, standings, player cards, match previews, fetch helpers |
-| `apply_notebook_refactor.py` | One-shot script that rewires the notebook to these modules |
+| `impact_lab.py` | Experimental: momentum, impact scorecard, pitch profile |
 | `Criketmatchbot.ipynb` | Exploratory notebook (API shapes, commentary) |
+| `Feature_Lab.ipynb` | Experiments for the `impact_lab` analytics |
+| `tests/` | Offline test suite |
 
 ### Charts
 
@@ -170,19 +172,30 @@ detail for the most recent over of each innings only. `match_ball_by_ball()`
 routes to ESPN instead — full match, but no shot coordinates. A live
 last-over shot map is possible; a full wagon wheel is not.
 
-## Notebook
+## Tests
 
-`apply_notebook_refactor.py` rewires `Criketmatchbot.ipynb` to import these
-modules, collapsing several rounds of copy-pasted renderers into one demo
-cell each. It matches cells by content rather than index and writes
-`Criketmatchbot.ipynb.bak` first.
+The suite runs offline against synthetic payloads shaped like real
+ESPNCricinfo responses — no network, no API keys:
 
 ```bash
-python apply_notebook_refactor.py
+pytest                          # or, with no pytest installed:
+python tests/test_scorecard.py
 ```
 
-Note that the notebook carries ~21 MB of stored `pprint` output. Clearing
-outputs before committing keeps the repo small.
+It covers the failure modes that actually bit during development: dismissal
+text arriving as a dict, bowler runs missing the `conceded` key, substitutes
+leaking into output, truncation splitting a code fence, and the impact
+zero-sum invariant holding as `wicket_runs` varies.
+
+## Notebooks
+
+- **`Criketmatchbot.ipynb`** — exploration of the API response shapes, now
+  importing from these modules rather than redefining renderers inline.
+- **`Feature_Lab.ipynb`** — experiments for `impact_lab.py`: turning points,
+  momentum tuning, impact calibration, pitch profiling.
+
+Both carry stored `pprint` output and are large. Clearing outputs before
+committing keeps the repo small.
 
 ## Attribution
 
