@@ -107,6 +107,8 @@ innings or raise `max_chars`.
 | `scorecard_charts.py` | Block-character charts (stdlib only) |
 | `scorecard_renderer.py` | `build_compact_scorecard()` — the main entry point |
 | `cricbot_views.py` | Live scores, standings, player cards, match previews, fetch helpers |
+| `cricbot_stats.py` | Statsguru access layer — numeric coercion, id resolution |
+| `cricbot_venue.py` | Venue profiling and pitch reads from `ground_stats()` |
 | `impact_lab.py` | Experimental: momentum, impact scorecard, pitch profile |
 | `Criketmatchbot.ipynb` | Exploratory notebook (API shapes, commentary) |
 | `Feature_Lab.ipynb` | Experiments for the `impact_lab` analytics |
@@ -166,6 +168,18 @@ cost. The cache never evicts, so cap it in a long-running process.
 **Dismissal text is sometimes a dict.** `dismissalText` arrives as either a
 string or `{short, long, commentary}`; `dismissal_text()` normalizes it.
 
+**Statsguru returns everything as strings.** Every value from the
+`ground_stats` / `player_*` family arrives as text — `"46.85"`, `"254*"` for a
+not-out, `"-"` for missing. `cricbot_stats.to_number()` normalizes them.
+Column names also vary by format and stat type, so look fields up through a
+list of candidates rather than one hard-coded key.
+
+**The async client does not cache.** The sync `SSR` caches the scorecard page
+per `(series_slug, match_slug)`, which is why `fetch_match_bundle()`'s five
+calls cost one request. `AsyncSSR` has no cache, so the same pattern async
+would cost five. Use `fetch_many_scorecards()` for concurrency across
+matches, where each match is one request either way.
+
 **No full-innings wagon wheel.** `wagonX/Y/Zone`, `pitchLine` and
 `shotControl` exist only on the SSR ball feed, which populates ball-level
 detail for the most recent over of each innings only. `match_ball_by_ball()`
@@ -180,6 +194,7 @@ ESPNCricinfo responses — no network, no API keys:
 ```bash
 pytest                          # or, with no pytest installed:
 python tests/test_scorecard.py
+python tests/test_venue.py
 ```
 
 It covers the failure modes that actually bit during development: dismissal

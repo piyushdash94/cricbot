@@ -269,8 +269,13 @@ def fetch_match_bundle(ci, series_slug, match_slug):
     """
     Fetch everything the scorecard views need.
 
-    cricdata caches the scorecard page per (series_slug, match_slug), so these
-    five calls resolve to a single HTTP request.
+    The sync client caches the scorecard page per (series_slug, match_slug),
+    so these five calls resolve to a single HTTP request.
+
+    There is deliberately no async counterpart: AsyncSSR does not cache
+    (cricdata architecture.md), so an async version of this would issue five
+    real requests instead of one. Use fetch_many_scorecards() for concurrency
+    across matches, where each match costs one request either way.
 
     Args:
         ci: CricinfoClient
