@@ -55,6 +55,16 @@ pip install -r requirements.txt
 `beautifulsoup4` is imported lazily and is only needed for commentary
 parsing — the scorecard path works without it.
 
+For rendered PNG charts (as opposed to the block-character ones, which need
+nothing), install the optional extra:
+
+```bash
+pip install -r requirements-plots.txt      # matplotlib
+```
+
+Everything else works without it; `scorecard_plots.PLOTS_AVAILABLE` reports
+whether it is present.
+
 ## Quick start
 
 ```python
@@ -110,6 +120,7 @@ innings or raise `max_chars`.
 | `cricbot_stats.py` | Statsguru access layer — numeric coercion, id resolution |
 | `cricbot_venue.py` | Venue profiling and pitch reads from `ground_stats()` |
 | `impact_lab.py` | Experimental: momentum, impact scorecard, pitch profile |
+| `scorecard_plots.py` | Optional PNG charts (needs the `matplotlib` extra) |
 | `Criketmatchbot.ipynb` | Exploratory notebook (API shapes, commentary) |
 | `Feature_Lab.ipynb` | Experiments for the `impact_lab` analytics |
 | `tests/` | Offline test suite |
@@ -130,6 +141,19 @@ from scorecard_charts import (
 
 Every chart returns a placeholder string rather than raising when given no
 data, so a missing section never breaks a message.
+
+### Plots (optional)
+
+```python
+from scorecard_plots import render_match_report, PLOTS_AVAILABLE
+
+if PLOTS_AVAILABLE:
+    paths = render_match_report(scorecard, "out/")
+```
+
+Renders win probability, manhattan, worm, partnerships and momentum as PNGs,
+reusing the same extractors as the text charts. Headless (`Agg` backend), and
+every figure is closed after writing so a long-running bot does not leak them.
 
 ### Views
 
@@ -195,6 +219,7 @@ ESPNCricinfo responses — no network, no API keys:
 pytest                          # or, with no pytest installed:
 python tests/test_scorecard.py
 python tests/test_venue.py
+python tests/test_plots.py      # render tests skip without matplotlib
 ```
 
 It covers the failure modes that actually bit during development: dismissal
