@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from backend.apis.demo_data import dashboard_shell, demo_scorecard
+from backend.apis.docs_catalog import docs_catalog
 from backend.apis.schemas import (
     AgentChatRequest,
     MatchPreviewRequest,
@@ -34,12 +35,13 @@ from backend.src.impact_lab import (
 )
 from backend.src.scorecard_helpers import innings_team_name, over_series
 from backend.src.scorecard_renderer import build_compact_scorecard
+from backend.src.ipl_data import IPL_SERIES, get_match_detail, list_ipl_matches
 
 
 app = FastAPI(
     title="Cricbot API",
     description="Chat-ready scorecards and match analytics from ESPNcricinfo-shaped payloads.",
-    version="1.1.0",
+    version="1.2.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -114,6 +116,34 @@ def search(q: str, limit: int = 12):
         return {"query": query, "results": [], "sources": []}
     results, sources = run_search(query, limit=max(1, min(limit, 30)))
     return {"query": query, "results": results, "sources": sources}
+
+
+@app.get("/api/ipl/seasons", tags=["ipl archive"])
+def ipl_seasons():
+    return {
+        "seasons": [
+            {"year": year, **metadata}
+            for year, metadata in IPL_SERIES.items()
+        ]
+    }
+
+
+@app.get("/api/ipl/matches", tags=["ipl archive"])
+def ipl_matches(season: int = 2025, q: str = "", limit: int = 24, offset: int = 0):
+    try:
+        return list_ipl_matches(season=season, query=q, limit=limit, offset=offset)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/ipl/matches/{series_slug}/{match_slug}", tags=["ipl archive"])
+def ipl_match_detail(series_slug: str, match_slug: str):
+    return get_match_detail(series_slug, match_slug)
+
+
+@app.get("/api/docs/catalog", tags=["documentation"])
+def documentation_catalog():
+    return docs_catalog()
 
 
 @app.get("/api/agent/status", tags=["agent"])

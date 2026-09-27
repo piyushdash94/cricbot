@@ -7,6 +7,7 @@ from langchain_core.tools import tool
 from backend.apis.demo_data import dashboard_shell, demo_scorecard
 from backend.src.impact_lab import impact_leaderboard, match_par, pitch_profile, turning_points
 from backend.src.scorecard_helpers import innings_team_name
+from backend.src.ipl_data import search_ipl_archive
 
 
 def _contains(query: str, *values: Any) -> bool:
@@ -17,18 +18,39 @@ def _contains(query: str, *values: Any) -> bool:
 @tool("search_matches", description="Search matches by team, status, result, or venue.")
 def search_matches(query: str) -> list[dict[str, Any]]:
     results = []
+    try:
+        archive_matches = search_ipl_archive(query, limit=12)
+    except Exception:
+        archive_matches = []
+    for match in archive_matches:
+        teams = match.get("teams", [])
+        scores = " · ".join(team.get("score", "—") for team in teams)
+        results.append({
+            "id": f"ipl:{match['series_slug']}:{match['match_slug']}",
+            "type": "match",
+            "title": match["title"],
+            "subtitle": match["status_text"],
+            "meta": f"IPL {match['season']} · {scores} · {match['venue']}",
+            "action": {
+                "type": "open_match",
+                "series_slug": match["series_slug"],
+                "match_slug": match["match_slug"],
+            },
+        })
     for match in dashboard_shell()["matches"]:
         teams = match["teams"]
         searchable = [*teams, match["status"], match["result"], match["venue"], "match", "score", "live"]
         if not query.strip() or _contains(query, *searchable):
-            results.append({
+            item = {
                 "id": f"match:{match['id']}",
                 "type": "match",
                 "title": f"{teams[0]} vs {teams[1]}",
                 "subtitle": match["result"],
                 "meta": f"{match['score'][0]} · {match['score'][1]} · {match['venue']}",
                 "action": {"type": "select_match", "match_id": match["id"]},
-            })
+            }
+            if not any(row["id"] == item["id"] for row in results):
+                results.append(item)
     return results
 
 
@@ -122,7 +144,7 @@ def select_tools(query: str) -> list[str]:
     """Route natural-language search to one or more grounded tools."""
     text = query.casefold()
     selected = []
-    if any(token in text for token in ("match", "live", "score", "vs", "rcb", "pbks", "mi", "gt", "kkr", "srh")):
+    if any(token in text for token in ("match", "live", "score", "vs", "2023", "2024", "2025", "rcb", "pbks", "mi", "gt", "kkr", "srh", "csk", "rr", "dc", "lsg")):
         selected.append("search_matches")
     if any(token in text for token in ("player", "batter", "bowler", "runs", "wicket", "kohli", "salt", "pandya", "iyer", "hazlewood")):
         selected.append("search_players")
@@ -143,4 +165,3 @@ def run_search(query: str, limit: int = 12) -> tuple[list[dict[str, Any]], list[
                 seen.add(item["id"])
                 results.append(item)
     return results[:limit], selected
-

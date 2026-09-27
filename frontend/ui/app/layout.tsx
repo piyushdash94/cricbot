@@ -6,8 +6,8 @@ import "./globals.css";
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
-const title = "Cricbot — Live Cricket Intelligence";
-const description = "Live scores, compact scorecards, momentum, player impact, and pitch intelligence in one fast match centre.";
+const title = "Cricbot — IPL Archive & Cricket Intelligence";
+const description = "Search IPL history, open complete match workspaces, explore available ball-by-ball detail, and chat with the local Pandit agent.";
 
 export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();

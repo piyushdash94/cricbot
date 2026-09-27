@@ -1,6 +1,6 @@
 # Cricbot
 
-A full-stack cricket match centre that turns ESPNcricinfo-shaped data into compact scorecards, text charts, live views, and match analytics.
+A local-first IPL archive and cricket assistant that turns ESPNcricinfo-shaped data into searchable match pages, scorecards, delivery timelines, analytics, and natural-language UI actions.
 
 The repository now has two clear surfaces:
 
@@ -23,12 +23,13 @@ cricbot/
 - Live/recent match, standings, player-card, and preview formatters
 - Unicode Manhattan, win-probability, worm, partnership, and phase charts
 - Momentum, turning-point, player-impact, and pitch-profile analytics
-- FastAPI endpoints for the dashboard, scorecard renderer, analytics, and views
+- FastAPI endpoints for the IPL 2023–2025 archive, canonical match detail, scorecards, analytics, and views
 - Multi-source cricket search that routes natural language to match, player, standings, and analytics tools
 - Pandit, a right-side assistant powered by an observable LangGraph workflow and the local Gemma 4 completion server
 - A collapsible live trace pane showing graph traversal, conditional branches, intermediate summaries, state patches, and UI actions
-- Responsive interactive UI with match switching, detail tabs, global search, theme switching, and summary sharing
-- Natural-language UI actions: select a match, open momentum/partnership views, navigate sections, change theme, and copy a summary
+- Archive-first UI with season filters, historical match search, scorecards, available ball-by-ball commentary, provenance, and analytics
+- Natural-language UI actions: open a historical match, switch match tabs, navigate sections, and change theme
+- In-app Docs drawer describing every public contract, source, tool owner, LangGraph state, transition, and fallback level
 - Stable demo data so the UI remains useful without network access
 
 ## Run locally
@@ -57,7 +58,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`. If `NEXT_PUBLIC_API_URL` is omitted, the frontend uses its built-in demo dataset.
+Open `http://localhost:3000`. If `NEXT_PUBLIC_API_URL` is omitted, the frontend calls `http://127.0.0.1:8000`. The backend automatically labels and uses its local demo fallback if the cricket provider is unavailable.
 
 ## API surface
 
@@ -65,9 +66,13 @@ Open `http://localhost:3000`. If `NEXT_PUBLIC_API_URL` is omitted, the frontend 
 |---|---|---|
 | `GET` | `/api/health` | Service health and version |
 | `GET` | `/api/dashboard` | Complete dashboard payload used by the UI |
+| `GET` | `/api/ipl/seasons` | Supported IPL archive seasons |
+| `GET` | `/api/ipl/matches?season=2025&q=RCB&limit=24&offset=0` | Search and page canonical IPL match cards |
+| `GET` | `/api/ipl/matches/{series_slug}/{match_slug}` | Match info, innings, balls, coverage, analytics, and provenance |
 | `GET` | `/api/search?q=...` | Route natural-language search across grounded cricket tools |
 | `GET` | `/api/agent/status` | Check the local Gemma model and completion contract |
 | `GET` | `/api/agent/graph` | Inspect Pandit's nodes, edges, and conditional transitions |
+| `GET` | `/api/docs/catalog` | Machine-readable API, source, tool, state, and transition documentation |
 | `POST` | `/api/agent/chat` | Ask Pandit a grounded question and receive UI actions |
 | `POST` | `/api/agent/chat/stream` | Stream node traces as NDJSON, followed by the final answer |
 | `POST` | `/api/scorecard/render` | Render a compact scorecard from match payloads |
@@ -112,11 +117,13 @@ print(build_compact_scorecard(
 | `backend/src/scorecard_charts.py` | Dependency-free text charts |
 | `backend/src/scorecard_renderer.py` | Main compact-scorecard renderer |
 | `backend/src/cricbot_views.py` | Match, standings, player, preview, and fetch helpers |
+| `backend/src/ipl_data.py` | IPL archive access, provider normalization, and ball-data fallback ladder |
 | `backend/src/impact_lab.py` | Experimental momentum, impact, and pitch analytics |
 | `backend/agent/tools.py` | LangChain search tools and deterministic query routing |
 | `backend/agent/service.py` | LangGraph state, nodes, trace events, grounded responses, and UI actions |
 | `backend/agent/gemma.py` | Local Gemma `/v1/completions` client and readiness checks |
 | `backend/apis/main.py` | FastAPI application and provider routes |
+| `backend/apis/docs_catalog.py` | In-app living documentation contract |
 
 ## Testing
 
@@ -134,6 +141,7 @@ All backend tests use synthetic ESPNcricinfo-shaped payloads. The core suite doe
 ## Data notes
 
 - ESPNcricinfo win probability is reported for the batting side. The helper layer inverts it when tracking one team across both innings.
-- `cricdata` caches match sub-resources by match slug, so scorecard, overs, partnerships, and fall-of-wickets views generally share one upstream request.
+- IPL list requests are cached in-process. Match detail uses independent best-effort provider calls so one failed sub-resource does not erase a usable scorecard.
+- Delivery coverage is explicit: dedicated ball feed, historical commentary, over summaries, demo fallback, or unavailable. Historical commentary can be partial.
 - The impact and pitch models are exploratory. A single match is not enough to rate a venue; aggregate by format, season, and ground before making strong claims.
 - Data comes from ESPNcricinfo through the unaffiliated `cricdata` package. Review the provider's terms before public deployment.

@@ -15,8 +15,8 @@ from .tools import run_search, select_tools
 
 
 PROMPT = PromptTemplate.from_template(
-    """You are Pandit, Cricbot's cricket assistant. Answer using only the facts below.
-If a fact is unavailable, say so instead of guessing. Use at most four short sentences.
+    """You are Pandit, a knowledgeable cricket friend inside Cricbot. Be warm, direct, and conversational.
+Answer using only the facts below. If a fact is unavailable, say so instead of guessing. Use at most four short sentences.
 Facts:
 {tool_results}
 Dashboard context: {ui_context}
@@ -121,17 +121,18 @@ class CricbotAgent:
             "base_url": self.gemma.base_url,
             "contract": "v1/completions",
             "orchestrator": "langgraph",
-            "graph_version": "1.0",
+            "graph_version": "1.1",
         }
 
     @staticmethod
     def graph_definition() -> dict[str, Any]:
         return {
             "name": "Pandit Cricket Assistant",
-            "version": "1.0",
+            "version": "1.1",
             "framework": "LangGraph",
             "nodes": GRAPH_NODES,
             "edges": GRAPH_EDGES,
+            "state_fields": list(PanditState.__annotations__),
         }
 
     def answer(
@@ -177,7 +178,7 @@ class CricbotAgent:
             "model_used": current.get("model_used", False),
             "validation": current.get("validation", "exact-tool-output"),
             "trace": trace,
-            "graph_version": "1.0",
+            "graph_version": "1.1",
         }
         yield {"event": "result", "data": response}
 
@@ -359,12 +360,12 @@ class CricbotAgent:
                 actions.append(action)
             if len(actions) >= 2:
                 break
-        if "momentum" in text:
-            actions.insert(0, {"type": "set_view", "view": "momentum"})
-        elif "partnership" in text or "stand" in text:
-            actions.insert(0, {"type": "set_view", "view": "stands"})
-        elif "scorecard" in text or "batting" in text:
-            actions.insert(0, {"type": "set_view", "view": "scorecard"})
+        if "ball by ball" in text or "ball-by-ball" in text or "commentary" in text:
+            actions.insert(0, {"type": "set_match_tab", "tab": "balls"})
+        elif "momentum" in text or "analysis" in text or "analytics" in text:
+            actions.insert(0, {"type": "set_match_tab", "tab": "analytics"})
+        elif "partnership" in text or "scorecard" in text or "batting" in text or "bowling" in text:
+            actions.insert(0, {"type": "set_match_tab", "tab": "scorecard"})
         if "light mode" in text:
             actions.insert(0, {"type": "theme", "value": "light"})
         elif "dark mode" in text:

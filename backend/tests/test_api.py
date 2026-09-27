@@ -77,6 +77,22 @@ class ApiTests(unittest.TestCase):
         self.assertIn("route_tools", [node["id"] for node in payload["nodes"]])
         self.assertIn("Understand request", [node["label"] for node in payload["nodes"]])
         self.assertTrue(any(edge.get("condition") for edge in payload["edges"]))
+        self.assertIn("ui_context", payload["state_fields"])
+
+    def test_ipl_seasons_and_validation_contract(self):
+        payload = self.client.get("/api/ipl/seasons").json()
+        self.assertEqual([item["year"] for item in payload["seasons"]], [2025, 2024, 2023])
+        response = self.client.get("/api/ipl/matches", params={"season": 1999})
+        self.assertEqual(response.status_code, 400)
+
+    def test_docs_catalog_explains_contracts_and_graph(self):
+        response = self.client.get("/api/docs/catalog")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(any(api["path"] == "/api/ipl/matches" for api in payload["apis"]))
+        self.assertTrue(any(tool["owner"] == "retrieve_facts" for tool in payload["tools"]))
+        self.assertTrue(any(edge.get("condition") for edge in payload["transitions"]))
+        self.assertEqual(payload["coverage"][0]["level"], "full")
 
     @patch.object(agent.gemma, "complete", return_value="RCB's biggest swing came late, and I opened the momentum view.")
     def test_agent_returns_grounded_actions(self, complete):

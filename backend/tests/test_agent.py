@@ -46,6 +46,9 @@ class AgentTests(unittest.TestCase):
         self.assertIn("search_players", selected)
         self.assertIn("search_analytics", selected)
 
+    def test_historical_query_routes_to_match_archive(self):
+        self.assertEqual(select_tools("Find the 2024 final"), ["search_matches"])
+
     def test_search_results_include_ui_actions(self):
         results, sources = run_search("Show the IPL standings")
         self.assertEqual(sources, ["search_standings"])
