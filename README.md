@@ -1,203 +1,123 @@
-# cricbot
+# Cricbot
 
-Compact cricket match summaries and text-mode charts, built on
-[cricdata](https://github.com/arnavbonigala/cricdata) (ESPNCricinfo).
+A full-stack cricket match centre that turns ESPNcricinfo-shaped data into compact scorecards, text charts, live views, and match analytics.
 
-Turns a match into something that fits in a single chat message:
+The repository now has two clear surfaces:
 
-```
-🏏 MATCH
-KKR vs RCB
-RCB won by 7 wickets (with 22 balls remaining)
-Eden Gardens, Kolkata
-
-KKR: 174/8 in 20 overs
-Extras: 6 | 4s: 18 | 6s: 8
-
-Top batters:
-- Ajinkya Rahane: 56(31) 4s:6 6s:4 SR:180.64
-- Sunil Narine: 44(26) 4s:5 6s:3 SR:169.23
-
-Phases:
-Powerplay    1-6   60/1  RPO 10.0
-Middle      7-16   91/5  RPO 9.1
-Death      17-20   23/2  RPO 5.8
-
-Runs/over (1-20):
-▂▁▂▆▆▇▃▄█▅▂▅▃▄▂▃▂▄▂▃
-W········WW·W·WW··WW
-
-Top stands:
-Narine/Rahane   ███████████▓▓▓▓▓▓▓▓▓▓▓▓▓ 103(55)
-
-Win% KKR (whole match):
-▅▄▄▄▅▆▅▅▆▆▅▆▆▆▅▅▄▄▄▄▄▄▃▂▁▁▁▁▂▂▁▂▁▁▁▁▁
+```text
+cricbot/
+├── backend/
+│   ├── apis/          # FastAPI routes, schemas, and demo data
+│   ├── src/           # Reusable formatting and analytics engine
+│   ├── tests/         # Offline engine and API contract tests
+│   ├── notebooks/     # API and feature exploration
+│   └── requirements.txt
+└── frontend/
+    └── ui/            # Responsive Vinext/React match-centre UI
 ```
 
-All charts are block characters — no image pipeline, no plotting library.
-They render anywhere a monospace code block does.
+## What is included
 
-## Status
+- Compact match scorecards sized for chat platforms
+- Live/recent match, standings, player-card, and preview formatters
+- Unicode Manhattan, win-probability, worm, partnership, and phase charts
+- Momentum, turning-point, player-impact, and pitch-profile analytics
+- FastAPI endpoints for the dashboard, scorecard renderer, analytics, and views
+- Responsive interactive UI with match switching, detail tabs, search, theme switching, and summary sharing
+- Stable demo data so the UI remains useful without network access
 
-This is a **formatting toolkit plus an exploratory notebook**, not yet a
-running bot. Every formatter takes an already-fetched payload and returns a
-string, so wiring it to Discord, Telegram, or a CLI is the remaining step —
-there is no transport, no command router, and no hosting config in here yet.
+## Run locally
 
-## Install
+### Backend
 
-Python 3.10+ (required by `cricdata`).
+Python 3.10 or newer is required.
 
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r backend/requirements.txt
+python -m backend.apis
 ```
 
-`beautifulsoup4` is imported lazily and is only needed for commentary
-parsing — the scorecard path works without it.
+The API is available at `http://127.0.0.1:8000`, with interactive documentation at `http://127.0.0.1:8000/docs`.
 
-## Quick start
+### Frontend
+
+```bash
+cd frontend/ui
+cp .env.example .env.local
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000`. If `NEXT_PUBLIC_API_URL` is omitted, the frontend uses its built-in demo dataset.
+
+## API surface
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/api/health` | Service health and version |
+| `GET` | `/api/dashboard` | Complete dashboard payload used by the UI |
+| `POST` | `/api/scorecard/render` | Render a compact scorecard from match payloads |
+| `POST` | `/api/analytics` | Impact, momentum, turning points, and pitch profile |
+| `POST` | `/api/views/live` | Format an existing live-match payload |
+| `POST` | `/api/views/standings` | Format a standings payload |
+| `POST` | `/api/views/player` | Format a player profile and career summary |
+| `POST` | `/api/views/preview` | Format a pre-match preview |
+| `GET` | `/api/live` | Fetch live matches through `cricdata` |
+| `GET` | `/api/matches/{series_slug}/{match_slug}` | Fetch the complete live match bundle |
+
+## Python usage
 
 ```python
 from cricdata import CricinfoClient
-from scorecard_renderer import build_compact_scorecard
-from cricbot_views import match_slugs
+
+from backend.src.cricbot_views import match_slugs
+from backend.src.scorecard_renderer import build_compact_scorecard
 
 ci = CricinfoClient()
-
 fixtures = ci.series_fixtures("ipl-2025-1449924")
-match = fixtures["content"]["matches"][0]
-series_slug, match_slug = match_slugs(match)
+series_slug, match_slug = match_slugs(fixtures["content"]["matches"][0])
 
 info = ci.match_info(series_slug, match_slug)
 scorecard = ci.match_scorecard(series_slug, match_slug)
 
-print(build_compact_scorecard(info, scorecard))
+print(build_compact_scorecard(
+    info,
+    scorecard,
+    phases=True,
+    charts=True,
+    partnerships=True,
+    fow=False,
+))
 ```
 
-### Turning on the extras
+## Backend modules
 
-```python
-build_compact_scorecard(
-    info, scorecard,
-    top_n=3,            # batters/bowlers per innings
-    max_chars=1900,     # output is truncated to fit
-    phases=True,        # powerplay / middle / death splits
-    charts=True,        # runs-per-over, win probability, run worm
-    partnerships=True,  # biggest stands, split by contribution
-    fow=False,          # fall of wickets (on by default)
-)
-```
-
-Approximate sizes for a completed T20:
-
-| Configuration | Chars |
+| Module | Responsibility |
 |---|---|
-| Default (batters, bowlers, FOW) | ~1480 |
-| `phases + charts + partnerships`, `fow=False` | ~1630 |
-| Everything on | ~2320 (exceeds one Discord message) |
+| `backend/src/scorecard_helpers.py` | Payload normalization and innings extraction |
+| `backend/src/scorecard_charts.py` | Dependency-free text charts |
+| `backend/src/scorecard_renderer.py` | Main compact-scorecard renderer |
+| `backend/src/cricbot_views.py` | Match, standings, player, preview, and fetch helpers |
+| `backend/src/impact_lab.py` | Experimental momentum, impact, and pitch analytics |
+| `backend/apis/main.py` | FastAPI application and provider routes |
 
-FOW is the expensive section. If you need charts *and* FOW, either split by
-innings or raise `max_chars`.
+## Testing
 
-## Modules
+```bash
+python backend/tests/test_scorecard.py
+python backend/tests/test_api.py
 
-| Module | Purpose |
-|---|---|
-| `scorecard_helpers.py` | Data extraction — player names, validation, match metadata, fall of wickets, innings analytics |
-| `scorecard_charts.py` | Block-character charts (stdlib only) |
-| `scorecard_renderer.py` | `build_compact_scorecard()` — the main entry point |
-| `cricbot_views.py` | Live scores, standings, player cards, match previews, fetch helpers |
-| `impact_lab.py` | Experimental: momentum, impact scorecard, pitch profile |
-| `Criketmatchbot.ipynb` | Exploratory notebook (API shapes, commentary) |
-| `Feature_Lab.ipynb` | Experiments for the `impact_lab` analytics |
-| `tests/` | Offline test suite |
-
-### Charts
-
-```python
-from scorecard_charts import (
-    sparkline,          # values -> single-line block chart
-    hbar,               # one horizontal bar
-    manhattan,          # runs per over + wicket markers
-    win_probability,    # win% curve on a fixed 0-100 scale
-    worm,               # cumulative runs, innings compared
-    partnership_bars,   # stands split by each batter's share
-    phase_table,        # powerplay / middle / death
-)
+cd frontend/ui
+npm test
 ```
 
-Every chart returns a placeholder string rather than raising when given no
-data, so a missing section never breaks a message.
-
-### Views
-
-```python
-from cricbot_views import (
-    format_live_matches,    # ci.live_matches()
-    format_standings,       # ci.series_standings()
-    format_player_card,     # ci.player_bio() + ci.player_career_stats()
-    format_match_preview,   # ci.match_info() + ci.ground_stats()
-    fetch_match_bundle,     # info + scorecard + overs + partnerships + FOW
-    fetch_many_scorecards,  # async, bounded concurrency
-)
-```
+All backend tests use synthetic ESPNcricinfo-shaped payloads. The core suite does not require network access or API keys.
 
 ## Data notes
 
-Things that are easy to get wrong, learned from real payloads:
-
-**Win probability is the batting side's.** Cricinfo reports
-`winProbability` for whichever team is batting in that innings, not for a
-fixed team. Verified on a completed match: the chasing innings ends at 100,
-while the side that lost ends its own innings at 42. To follow one team
-across a whole match you must invert the innings where they bowled —
-`win_prob_series()` does this.
-
-**Optional sections are free.** `cricdata` caches the scorecard page per
-`(series_slug, match_slug)`, so `match_scorecard`, `match_info`,
-`match_overs`, `match_partnerships` and `match_fall_of_wickets` all resolve
-to a single HTTP request. Phases, charts and partnerships add no network
-cost. The cache never evicts, so cap it in a long-running process.
-
-**Field names differ from the obvious guess.** Standings rows use
-`teamInfo` and `nrr` — not `team` and `netRunRate`. Bowler runs conceded is
-`conceded`, not `runs`. Batting strike rate is `strikerate`, lowercase `r`.
-
-**Dismissal text is sometimes a dict.** `dismissalText` arrives as either a
-string or `{short, long, commentary}`; `dismissal_text()` normalizes it.
-
-**No full-innings wagon wheel.** `wagonX/Y/Zone`, `pitchLine` and
-`shotControl` exist only on the SSR ball feed, which populates ball-level
-detail for the most recent over of each innings only. `match_ball_by_ball()`
-routes to ESPN instead — full match, but no shot coordinates. A live
-last-over shot map is possible; a full wagon wheel is not.
-
-## Tests
-
-The suite runs offline against synthetic payloads shaped like real
-ESPNCricinfo responses — no network, no API keys:
-
-```bash
-pytest                          # or, with no pytest installed:
-python tests/test_scorecard.py
-```
-
-It covers the failure modes that actually bit during development: dismissal
-text arriving as a dict, bowler runs missing the `conceded` key, substitutes
-leaking into output, truncation splitting a code fence, and the impact
-zero-sum invariant holding as `wicket_runs` varies.
-
-## Notebooks
-
-- **`Criketmatchbot.ipynb`** — exploration of the API response shapes, now
-  importing from these modules rather than redefining renderers inline.
-- **`Feature_Lab.ipynb`** — experiments for `impact_lab.py`: turning points,
-  momentum tuning, impact calibration, pitch profiling.
-
-Both carry stored `pprint` output and are large. Clearing outputs before
-committing keeps the repo small.
-
-## Attribution
-
-Data comes from ESPNCricinfo via `cricdata`, which is unaffiliated with
-ESPN. Check their terms before deploying anything public-facing.
+- ESPNcricinfo win probability is reported for the batting side. The helper layer inverts it when tracking one team across both innings.
+- `cricdata` caches match sub-resources by match slug, so scorecard, overs, partnerships, and fall-of-wickets views generally share one upstream request.
+- The impact and pitch models are exploratory. A single match is not enough to rate a venue; aggregate by format, season, and ground before making strong claims.
+- Data comes from ESPNcricinfo through the unaffiliated `cricdata` package. Review the provider's terms before public deployment.
