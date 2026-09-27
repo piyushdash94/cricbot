@@ -60,6 +60,18 @@ class AgentTests(unittest.TestCase):
         reply = "RCB won by 6 runs\nRCB won by 6 runs\nRCB won by 6 runs"
         self.assertEqual(CricbotAgent._limit_sentences(reply), "RCB won by 6 runs")
 
+    def test_langgraph_trace_contains_state_patches(self):
+        client = GemmaCompletionClient(client=httpx.Client(
+            base_url="http://127.0.0.1:8080",
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={
+                "choices": [{"text": "RCB won by 6 runs."}],
+            })),
+        ))
+        result = CricbotAgent(gemma=client).answer("Tell me about RCB vs PBKS")
+        route = next(event for event in result["trace"] if event["node"] == "route_tools")
+        self.assertIn("search_matches", route["patch"]["tool_names"])
+        self.assertEqual(result["validation"], "grounded")
+
 
 if __name__ == "__main__":
     unittest.main()

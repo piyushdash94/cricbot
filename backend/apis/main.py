@@ -1,9 +1,11 @@
 """FastAPI application exposing the Cricbot formatting and analytics engine."""
 
+import json
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from backend.apis.demo_data import dashboard_shell, demo_scorecard
 from backend.apis.schemas import (
@@ -119,6 +121,11 @@ def agent_status():
     return agent.status()
 
 
+@app.get("/api/agent/graph", tags=["agent"])
+def agent_graph():
+    return agent.graph_definition()
+
+
 @app.post("/api/agent/chat", tags=["agent"])
 def agent_chat(request: AgentChatRequest):
     return agent.answer(
@@ -126,6 +133,19 @@ def agent_chat(request: AgentChatRequest):
         history=[item.model_dump() for item in request.history],
         ui_context=request.ui_context,
     )
+
+
+@app.post("/api/agent/chat/stream", tags=["agent"])
+def agent_chat_stream(request: AgentChatRequest):
+    def events():
+        for event in agent.iter_answer(
+            request.message,
+            history=[item.model_dump() for item in request.history],
+            ui_context=request.ui_context,
+        ):
+            yield json.dumps(event, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(events(), media_type="application/x-ndjson")
 
 
 @app.post("/api/scorecard/render", tags=["scorecard"])

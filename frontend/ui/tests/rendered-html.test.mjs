@@ -24,5 +24,7 @@ test("server-renders the Cricbot match centre", async () => {
   assert.match(html, /MATCH CENTRE/);
   assert.match(html, /Royal Challengers Bengaluru/);
   assert.match(html, /Win probability/);
+  assert.match(html, /Agent graph/);
+  assert.match(html, /Toggle agent trace/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });

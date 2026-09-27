@@ -39,6 +39,47 @@ type ChatMessage = {
   tools?: string[];
 };
 
+type GraphNode = {
+  id: string;
+  label: string;
+  kind: string;
+  description: string;
+};
+
+type AgentGraph = {
+  name: string;
+  version: string;
+  framework: string;
+  nodes: GraphNode[];
+  edges: { from: string; to: string; condition?: string }[];
+};
+
+type TraceEvent = {
+  sequence: number;
+  node: string;
+  label: string;
+  kind: string;
+  summary: string;
+  patch: Record<string, unknown>;
+  snapshot: {
+    phase: string;
+    route: string;
+    tools: string[];
+    result_count: number;
+    action_count: number;
+    model_used: boolean;
+    validation: string;
+  };
+};
+
+type AgentResult = {
+  reply: string;
+  tool_calls?: { name: string }[];
+  ui_actions?: UiAction[];
+  model_used?: boolean;
+  validation?: string;
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
 const matches: Match[] = [
@@ -128,6 +169,9 @@ export default function Home() {
   const [copied, setCopied] = useState(false);
   const [apiStatus, setApiStatus] = useState<"demo" | "connected" | "offline">("demo");
   const [chatOpen, setChatOpen] = useState(true);
+  const [traceOpen, setTraceOpen] = useState(false);
+  const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
+  const [agentGraph, setAgentGraph] = useState<AgentGraph | null>(null);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [agentStatus, setAgentStatus] = useState<"checking" | "ready" | "offline">("checking");
@@ -168,6 +212,12 @@ export default function Home() {
         setAgentStatus(payload.status === "ready" ? "ready" : "offline");
       })
       .catch(() => setAgentStatus("offline"));
+    fetch(`${API_BASE}/api/agent/graph`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Graph unavailable");
+        setAgentGraph(await response.json());
+      })
+      .catch(() => setAgentGraph(null));
   }, []);
 
   useEffect(() => {
@@ -246,8 +296,9 @@ export default function Home() {
     setMessages((current) => [...current, userMessage]);
     setChatInput("");
     setChatLoading(true);
+    setTraceEvents([]);
     try {
-      const response = await fetch(`${API_BASE}/api/agent/chat`, {
+      const response = await fetch(`${API_BASE}/api/agent/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -264,7 +315,31 @@ export default function Home() {
         }),
       });
       if (!response.ok) throw new Error("Pandit failed to respond");
-      const payload = await response.json();
+      if (!response.body) throw new Error("Pandit stream unavailable");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let payload: AgentResult | null = null;
+      const processLine = async (line: string) => {
+        if (!line.trim()) return;
+        const item = JSON.parse(line) as { event: "trace" | "result"; data: TraceEvent | AgentResult };
+        if (item.event === "trace") {
+          setTraceEvents((current) => [...current, item.data as TraceEvent]);
+          await new Promise((resolve) => window.setTimeout(resolve, 140));
+        } else {
+          payload = item.data as AgentResult;
+        }
+      };
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value, { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) await processLine(line);
+        if (done) break;
+      }
+      await processLine(buffer);
+      if (!payload) throw new Error("Pandit completed without a result");
       setMessages((current) => [...current, {
         role: "assistant",
         content: payload.reply,
@@ -280,8 +355,13 @@ export default function Home() {
     }
   }
 
+  const currentTrace = traceEvents[traceEvents.length - 1];
+  const visitedNodes = new Set(traceEvents.map((event) => event.node));
+  const graphNode = (id: string) => agentGraph?.nodes.find((node) => node.id === id);
+  const graphState = (id: string) => chatLoading && currentTrace?.node === id ? "active" : visitedNodes.has(id) ? "complete" : "idle";
+
   return (
-    <div className={`${dark ? "app dark" : "app light"}${chatOpen ? " chat-open" : ""}`}>
+    <div className={`${dark ? "app dark" : "app light"}${chatOpen ? " chat-open" : ""}${traceOpen ? " trace-open" : ""}`}>
       <aside className="sidebar" aria-label="Primary navigation">
         <button className="brand" onClick={() => selectSection("Overview")} aria-label="Cricbot home">
           <span className="brand-mark"><span /></span>
@@ -460,11 +540,65 @@ export default function Home() {
 
         <footer><span>CRICBOT · Cricket intelligence, compressed.</span><span>Data via ESPNcricinfo · Updated moments ago</span></footer>
       </main>
+      <aside className={traceOpen ? "trace-panel open" : "trace-panel"} aria-label="Pandit agent trace">
+        <header className="trace-header">
+          <div><span className="trace-kicker">LIVE EXECUTION</span><strong>Agent graph</strong><small>{agentGraph?.framework ?? "LangGraph"} · v{agentGraph?.version ?? "1.0"}</small></div>
+          <button onClick={() => setTraceOpen(false)} aria-label="Close agent trace">×</button>
+        </header>
+        <div className="trace-scroll">
+          <section className="graph-card" aria-label="Pandit graph nodes">
+            <div className="graph-card-head"><span>Workflow</span><em>{chatLoading ? "Running" : traceEvents.length ? "Complete" : "Waiting"}</em></div>
+            <div className="graph-flow">
+              <GraphNodeCard node={graphNode("normalize_request")} state={graphState("normalize_request")} />
+              <span className="flow-arrow">↓</span>
+              <GraphNodeCard node={graphNode("route_tools")} state={graphState("route_tools")} />
+              <span className="flow-arrow">↓</span>
+              <GraphNodeCard node={graphNode("retrieve_facts")} state={graphState("retrieve_facts")} />
+              <span className="flow-arrow">↓</span>
+              <GraphNodeCard node={graphNode("summarize_context")} state={graphState("summarize_context")} />
+              <span className="flow-arrow">↓</span>
+              <GraphNodeCard node={graphNode("plan_ui")} state={graphState("plan_ui")} />
+              <div className="graph-branches">
+                <div className="branch-path"><span>EXACT</span><GraphNodeCard node={graphNode("exact_response")} state={graphState("exact_response")} /></div>
+                <div className="branch-path"><span>MODEL</span><GraphNodeCard node={graphNode("gemma_response")} state={graphState("gemma_response")} /><i>↓</i><GraphNodeCard node={graphNode("validate_response")} state={graphState("validate_response")} /></div>
+              </div>
+              <span className="flow-arrow">↓</span>
+              <GraphNodeCard node={graphNode("finalize")} state={graphState("finalize")} />
+            </div>
+          </section>
+
+          <section className="state-card" aria-live="polite">
+            <div className="graph-card-head"><span>Current state</span><em>{currentTrace ? `#${currentTrace.sequence}` : "IDLE"}</em></div>
+            {currentTrace ? <div className="state-grid">
+              <div><span>Phase</span><strong>{currentTrace.label}</strong></div>
+              <div><span>Route</span><strong>{currentTrace.snapshot.route}</strong></div>
+              <div><span>Tools</span><strong>{currentTrace.snapshot.tools.length}</strong></div>
+              <div><span>Results</span><strong>{currentTrace.snapshot.result_count}</strong></div>
+              <div><span>Actions</span><strong>{currentTrace.snapshot.action_count}</strong></div>
+              <div><span>Validation</span><strong>{currentTrace.snapshot.validation}</strong></div>
+            </div> : <p className="trace-empty">Send Pandit a message to watch state move through the graph.</p>}
+          </section>
+
+          <section className="timeline-card">
+            <div className="graph-card-head"><span>State transitions</span><em>{traceEvents.length} EVENTS</em></div>
+            <div className="trace-timeline" aria-live="polite">
+              {traceEvents.length ? traceEvents.map((event) => <details className="trace-event" key={`${event.sequence}-${event.node}`} open={event.sequence === currentTrace?.sequence}>
+                <summary><span>{String(event.sequence).padStart(2, "0")}</span><div><strong>{event.label}</strong><small>{event.kind}</small></div><i>⌄</i></summary>
+                <p>{event.summary}</p>
+                <div className="state-patch"><span>STATE PATCH</span><pre>{JSON.stringify(event.patch, null, 2)}</pre></div>
+              </details>) : <p className="trace-empty">No transitions yet. The next message will stream node updates here.</p>}
+            </div>
+          </section>
+        </div>
+      </aside>
       <aside className={chatOpen ? "pandit-panel open" : "pandit-panel"} aria-label="Pandit cricket assistant">
         <header className="pandit-header">
           <div className="pandit-avatar">पं<span>✦</span></div>
           <div><strong>Pandit</strong><small><i className={agentStatus} /> Gemma 4 · {agentStatus === "ready" ? "Local & ready" : agentStatus === "offline" ? "Offline fallback" : "Checking"}</small></div>
-          <button onClick={() => setChatOpen(false)} aria-label="Close Pandit">×</button>
+          <div className="pandit-header-actions">
+            <button className={traceOpen ? "trace-toggle active" : "trace-toggle"} onClick={() => setTraceOpen(!traceOpen)} aria-label="Toggle agent trace" title="Agent graph and state trace">◇{traceEvents.length > 0 && <b>{traceEvents.length}</b>}</button>
+            <button onClick={() => { setChatOpen(false); setTraceOpen(false); }} aria-label="Close Pandit">×</button>
+          </div>
         </header>
         <div className="pandit-context">
           <span>Watching</span><strong>{match.teams[0]} vs {match.teams[1]}</strong><small>{match.scores[0]} · {match.scores[1]}</small>
@@ -494,4 +628,11 @@ export default function Home() {
 
 function TeamScore({ initials, name, score, overs, color, reverse = false }: { initials: string; name: string; score: string; overs: string; color: string; reverse?: boolean }) {
   return <div className={reverse ? "team-score reverse" : "team-score"}><div className={`team-crest ${color}`}>{initials.slice(0, 2)}<span /></div><div><p>{name}</p><strong>{score}</strong><span>{overs}</span></div></div>;
+}
+
+function GraphNodeCard({ node, state }: { node?: GraphNode; state: "idle" | "active" | "complete" }) {
+  return <div className={`graph-node ${state}`} data-node={node?.id ?? "loading"}>
+    <span className="node-dot">{state === "complete" ? "✓" : state === "active" ? "●" : "○"}</span>
+    <div><strong>{node?.label ?? "Loading"}</strong><small>{node?.description ?? "Loading graph definition…"}</small></div>
+  </div>;
 }

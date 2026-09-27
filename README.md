@@ -25,7 +25,8 @@ cricbot/
 - Momentum, turning-point, player-impact, and pitch-profile analytics
 - FastAPI endpoints for the dashboard, scorecard renderer, analytics, and views
 - Multi-source cricket search that routes natural language to match, player, standings, and analytics tools
-- Pandit, a right-side assistant powered by LangChain and the local Gemma 4 completion server
+- Pandit, a right-side assistant powered by an observable LangGraph workflow and the local Gemma 4 completion server
+- A collapsible live trace pane showing graph traversal, conditional branches, intermediate summaries, state patches, and UI actions
 - Responsive interactive UI with match switching, detail tabs, global search, theme switching, and summary sharing
 - Natural-language UI actions: select a match, open momentum/partnership views, navigate sections, change theme, and copy a summary
 - Stable demo data so the UI remains useful without network access
@@ -66,7 +67,9 @@ Open `http://localhost:3000`. If `NEXT_PUBLIC_API_URL` is omitted, the frontend 
 | `GET` | `/api/dashboard` | Complete dashboard payload used by the UI |
 | `GET` | `/api/search?q=...` | Route natural-language search across grounded cricket tools |
 | `GET` | `/api/agent/status` | Check the local Gemma model and completion contract |
+| `GET` | `/api/agent/graph` | Inspect Pandit's nodes, edges, and conditional transitions |
 | `POST` | `/api/agent/chat` | Ask Pandit a grounded question and receive UI actions |
+| `POST` | `/api/agent/chat/stream` | Stream node traces as NDJSON, followed by the final answer |
 | `POST` | `/api/scorecard/render` | Render a compact scorecard from match payloads |
 | `POST` | `/api/analytics` | Impact, momentum, turning points, and pitch profile |
 | `POST` | `/api/views/live` | Format an existing live-match payload |
@@ -111,7 +114,7 @@ print(build_compact_scorecard(
 | `backend/src/cricbot_views.py` | Match, standings, player, preview, and fetch helpers |
 | `backend/src/impact_lab.py` | Experimental momentum, impact, and pitch analytics |
 | `backend/agent/tools.py` | LangChain search tools and deterministic query routing |
-| `backend/agent/service.py` | Grounded Pandit response orchestration and UI actions |
+| `backend/agent/service.py` | LangGraph state, nodes, trace events, grounded responses, and UI actions |
 | `backend/agent/gemma.py` | Local Gemma `/v1/completions` client and readiness checks |
 | `backend/apis/main.py` | FastAPI application and provider routes |
 
