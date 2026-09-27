@@ -545,10 +545,10 @@ export default function Home() {
           <div><span className="trace-kicker">LIVE EXECUTION</span><strong>Agent graph</strong><small>{agentGraph?.framework ?? "LangGraph"} · v{agentGraph?.version ?? "1.0"}</small></div>
           <button onClick={() => setTraceOpen(false)} aria-label="Close agent trace">×</button>
         </header>
-        <div className="trace-scroll">
+        <div className="trace-scroll" tabIndex={0} aria-label="Scrollable agent trace content">
           <section className="graph-card" aria-label="Pandit graph nodes">
             <div className="graph-card-head"><span>Workflow</span><em>{chatLoading ? "Running" : traceEvents.length ? "Complete" : "Waiting"}</em></div>
-            <div className="graph-flow">
+            <div className="graph-flow" tabIndex={0} aria-label="Scrollable workflow graph">
               <GraphNodeCard node={graphNode("normalize_request")} state={graphState("normalize_request")} />
               <span className="flow-arrow">↓</span>
               <GraphNodeCard node={graphNode("route_tools")} state={graphState("route_tools")} />
@@ -569,23 +569,25 @@ export default function Home() {
 
           <section className="state-card" aria-live="polite">
             <div className="graph-card-head"><span>Current state</span><em>{currentTrace ? `#${currentTrace.sequence}` : "IDLE"}</em></div>
-            {currentTrace ? <div className="state-grid">
-              <div><span>Phase</span><strong>{currentTrace.label}</strong></div>
-              <div><span>Route</span><strong>{currentTrace.snapshot.route}</strong></div>
-              <div><span>Tools</span><strong>{currentTrace.snapshot.tools.length}</strong></div>
-              <div><span>Results</span><strong>{currentTrace.snapshot.result_count}</strong></div>
-              <div><span>Actions</span><strong>{currentTrace.snapshot.action_count}</strong></div>
-              <div><span>Validation</span><strong>{currentTrace.snapshot.validation}</strong></div>
-            </div> : <p className="trace-empty">Send Pandit a message to watch state move through the graph.</p>}
+            <div className="state-scroll" tabIndex={0} aria-label="Scrollable current agent state">
+              {currentTrace ? <div className="state-grid">
+                <div><span>Phase</span><strong>{currentTrace.label}</strong></div>
+                <div><span>Route</span><strong>{currentTrace.snapshot.route}</strong></div>
+                <div><span>Tools</span><strong>{currentTrace.snapshot.tools.length}</strong></div>
+                <div><span>Results</span><strong>{currentTrace.snapshot.result_count}</strong></div>
+                <div><span>Actions</span><strong>{currentTrace.snapshot.action_count}</strong></div>
+                <div><span>Validation</span><strong>{currentTrace.snapshot.validation}</strong></div>
+              </div> : <p className="trace-empty">Send Pandit a message to watch state move through the graph.</p>}
+            </div>
           </section>
 
           <section className="timeline-card">
             <div className="graph-card-head"><span>State transitions</span><em>{traceEvents.length} EVENTS</em></div>
-            <div className="trace-timeline" aria-live="polite">
+            <div className="trace-timeline" aria-live="polite" tabIndex={0} aria-label="Scrollable state transitions">
               {traceEvents.length ? traceEvents.map((event) => <details className="trace-event" key={`${event.sequence}-${event.node}`} open={event.sequence === currentTrace?.sequence}>
                 <summary><span>{String(event.sequence).padStart(2, "0")}</span><div><strong>{event.label}</strong><small>{event.kind}</small></div><i>⌄</i></summary>
                 <p>{event.summary}</p>
-                <div className="state-patch"><span>STATE PATCH</span><pre>{JSON.stringify(event.patch, null, 2)}</pre></div>
+                <div className="state-patch"><span>STATE PATCH</span><pre tabIndex={0}>{JSON.stringify(event.patch, null, 2)}</pre></div>
               </details>) : <p className="trace-empty">No transitions yet. The next message will stream node updates here.</p>}
             </div>
           </section>
