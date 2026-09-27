@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { FormEvent } from "react";
 
 type Match = {
   id: string;
@@ -14,6 +15,31 @@ type Match = {
   venue: string;
   winProbability: number[];
 };
+
+type SearchResult = {
+  id: string;
+  type: string;
+  title: string;
+  subtitle: string;
+  meta: string;
+  action?: UiAction;
+};
+
+type UiAction = {
+  type: "select_match" | "set_view" | "navigate" | "theme" | "copy_summary";
+  match_id?: string;
+  view?: "scorecard" | "momentum" | "stands";
+  section?: string;
+  value?: "light" | "dark";
+};
+
+type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+  tools?: string[];
+};
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
 const matches: Match[] = [
   {
@@ -93,16 +119,26 @@ export default function Home() {
   const [selectedMatch, setSelectedMatch] = useState(0);
   const [activeView, setActiveView] = useState<"scorecard" | "momentum" | "stands">("scorecard");
   const [section, setSection] = useState("Overview");
-  const [query, setQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchSources, setSearchSources] = useState<string[]>([]);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchLoading, setSearchLoading] = useState(false);
   const [dark, setDark] = useState(true);
   const [copied, setCopied] = useState(false);
   const [apiStatus, setApiStatus] = useState<"demo" | "connected" | "offline">("demo");
+  const [chatOpen, setChatOpen] = useState(true);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const [agentStatus, setAgentStatus] = useState<"checking" | "ready" | "offline">("checking");
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    { role: "assistant", content: "I’m Pandit, your cricket intelligence assistant. Ask about this match, search players or standings, or tell me what you want to see in the dashboard." },
+  ]);
+  const chatEndRef = useRef<HTMLDivElement>(null);
   const match = matchFeed[selectedMatch];
 
   useEffect(() => {
-    const apiBase = process.env.NEXT_PUBLIC_API_URL;
-    if (!apiBase) return;
-    fetch(`${apiBase}/api/dashboard`)
+    fetch(`${API_BASE}/api/dashboard`)
       .then(async (response) => {
         if (!response.ok) throw new Error("API unavailable");
         const payload = await response.json();
@@ -125,17 +161,48 @@ export default function Home() {
         setApiStatus("connected");
       })
       .catch(() => setApiStatus("offline"));
+    fetch(`${API_BASE}/api/agent/status`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Agent unavailable");
+        const payload = await response.json();
+        setAgentStatus(payload.status === "ready" ? "ready" : "offline");
+      })
+      .catch(() => setAgentStatus("offline"));
   }, []);
 
-  const filteredImpact = useMemo(
-    () => impactPlayers.filter((player) => player.name.toLowerCase().includes(query.toLowerCase())),
-    [query],
-  );
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (query.length < 2) return;
+    const timer = window.setTimeout(() => {
+      fetch(`${API_BASE}/api/search?q=${encodeURIComponent(query)}&limit=10`)
+        .then(async (response) => {
+          if (!response.ok) throw new Error("Search failed");
+          const payload = await response.json();
+          setSearchResults(payload.results ?? []);
+          setSearchSources(payload.sources ?? []);
+          setSearchOpen(true);
+        })
+        .catch(() => {
+          setSearchResults([]);
+          setSearchSources([]);
+        })
+        .finally(() => setSearchLoading(false));
+    }, 240);
+    return () => window.clearTimeout(timer);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, chatLoading]);
 
   async function copySummary() {
-    await navigator.clipboard.writeText(sharedSummary);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1800);
+    try {
+      await navigator.clipboard.writeText(sharedSummary);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      setCopied(false);
+    }
   }
 
   function selectSection(label: string) {
@@ -144,8 +211,77 @@ export default function Home() {
     document.getElementById(target)?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  function applyUiAction(action?: UiAction) {
+    if (!action) return;
+    if (action.type === "select_match" && action.match_id) {
+      const index = matchFeed.findIndex((item) => item.id === action.match_id);
+      if (index >= 0) setSelectedMatch(index);
+      document.getElementById("matches")?.scrollIntoView({ behavior: "smooth" });
+    }
+    if (action.type === "set_view" && action.view) {
+      setActiveView(action.view);
+      document.getElementById("scorecard")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    if (action.type === "navigate" && action.section) {
+      const label = action.section.charAt(0).toUpperCase() + action.section.slice(1);
+      setSection(label);
+      document.getElementById(action.section)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    if (action.type === "theme" && action.value) setDark(action.value === "dark");
+    if (action.type === "copy_summary") void copySummary();
+  }
+
+  function chooseSearchResult(result: SearchResult) {
+    applyUiAction(result.action);
+    setSearchQuery(result.title);
+    setSearchOpen(false);
+  }
+
+  async function sendChat(event?: FormEvent, suggestedMessage?: string) {
+    event?.preventDefault();
+    const text = (suggestedMessage ?? chatInput).trim();
+    if (!text || chatLoading) return;
+    const userMessage: ChatMessage = { role: "user", content: text };
+    const history = messages.slice(-8);
+    setMessages((current) => [...current, userMessage]);
+    setChatInput("");
+    setChatLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/agent/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: text,
+          history,
+          ui_context: {
+            selected_match: match.id,
+            teams: match.teams,
+            score: match.scores,
+            active_view: activeView,
+            section,
+            theme: dark ? "dark" : "light",
+          },
+        }),
+      });
+      if (!response.ok) throw new Error("Pandit failed to respond");
+      const payload = await response.json();
+      setMessages((current) => [...current, {
+        role: "assistant",
+        content: payload.reply,
+        tools: (payload.tool_calls ?? []).map((item: { name: string }) => item.name.replace("search_", "")),
+      }]);
+      (payload.ui_actions ?? []).forEach((action: UiAction) => applyUiAction(action));
+      setAgentStatus("ready");
+    } catch {
+      setMessages((current) => [...current, { role: "assistant", content: "I couldn’t reach the local Pandit service. The dashboard is still available, and I’ll reconnect when the backend is ready." }]);
+      setAgentStatus("offline");
+    } finally {
+      setChatLoading(false);
+    }
+  }
+
   return (
-    <div className={dark ? "app dark" : "app light"}>
+    <div className={`${dark ? "app dark" : "app light"}${chatOpen ? " chat-open" : ""}`}>
       <aside className="sidebar" aria-label="Primary navigation">
         <button className="brand" onClick={() => selectSection("Overview")} aria-label="Cricbot home">
           <span className="brand-mark"><span /></span>
@@ -181,11 +317,44 @@ export default function Home() {
             <h1>Good evening, Saket.</h1>
           </div>
           <div className="top-actions">
-            <label className="search-control">
-              <span>⌕</span>
-              <input aria-label="Search impact players" placeholder="Search players" value={query} onChange={(event) => setQuery(event.target.value)} />
-            </label>
+            <div className="search-wrap">
+              <label className="search-control">
+                <span>{searchLoading ? "◌" : "⌕"}</span>
+                <input
+                  aria-label="Search matches, players, standings, and analytics"
+                  placeholder="Search cricket…"
+                  value={searchQuery}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setSearchQuery(value);
+                    setSearchLoading(value.trim().length >= 2);
+                    if (value.trim().length < 2) {
+                      setSearchResults([]);
+                      setSearchSources([]);
+                    }
+                  }}
+                  onFocus={() => setSearchOpen(true)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && searchResults[0]) chooseSearchResult(searchResults[0]);
+                    if (event.key === "Escape") setSearchOpen(false);
+                  }}
+                />
+              </label>
+              {searchOpen && searchQuery.trim().length >= 2 && (
+                <div className="search-popover" role="listbox">
+                  <div className="search-popover-head"><span>{searchLoading ? "Searching…" : `${searchResults.length} results`}</span><button onClick={() => setSearchOpen(false)}>×</button></div>
+                  {searchResults.length ? searchResults.map((result) => (
+                    <button key={result.id} className="search-result" onClick={() => chooseSearchResult(result)}>
+                      <span className={`result-type ${result.type}`}>{result.type.slice(0, 1).toUpperCase()}</span>
+                      <span><strong>{result.title}</strong><small>{result.subtitle}</small><em>{result.meta}</em></span>
+                    </button>
+                  )) : !searchLoading && <p className="search-empty">No grounded result found. Try a team, player, score, pitch, or standings query.</p>}
+                  {searchSources.length > 0 && <div className="search-sources">Searched {searchSources.map((source) => source.replace("search_", "")).join(" · ")}</div>}
+                </div>
+              )}
+            </div>
             <button className="icon-button" onClick={() => setDark(!dark)} aria-label="Toggle color theme">{dark ? "☼" : "☾"}</button>
+            <button className="pandit-toggle" onClick={() => setChatOpen(!chatOpen)} aria-label="Toggle Pandit assistant"><span>✦</span> Pandit</button>
             <button className="share-button" onClick={copySummary}>{copied ? "Copied!" : "Share summary"}<span>↗</span></button>
           </div>
         </header>
@@ -232,7 +401,7 @@ export default function Home() {
           </article>
         </section>
 
-        <section className="content-grid">
+        <section className="content-grid" id="scorecard">
           <article className="innings-card">
             <div className="tab-row">
               <div role="tablist" aria-label="Match detail view">
@@ -279,7 +448,7 @@ export default function Home() {
           <article className="impact-card">
             <div className="card-heading"><div><p className="eyebrow">RUNS ABOVE PAR</p><h2>Impact leaderboard</h2></div><button>Methodology ↗</button></div>
             <div className="impact-list">
-              {filteredImpact.length ? filteredImpact.map((player) => <div className="impact-row" key={player.name}><span className="rank">{player.rank}</span><span className={`team-badge ${player.team.toLowerCase()}`}>{player.team}</span><div><strong>{player.name}</strong><small>{player.detail}</small></div><em>{player.role}</em><b>{player.value}</b></div>) : <p className="empty-state">No player matches “{query}”.</p>}
+              {impactPlayers.map((player) => <div className="impact-row" key={player.name}><span className="rank">{player.rank}</span><span className={`team-badge ${player.team.toLowerCase()}`}>{player.team}</span><div><strong>{player.name}</strong><small>{player.detail}</small></div><em>{player.role}</em><b>{player.value}</b></div>)}
             </div>
           </article>
 
@@ -291,6 +460,34 @@ export default function Home() {
 
         <footer><span>CRICBOT · Cricket intelligence, compressed.</span><span>Data via ESPNcricinfo · Updated moments ago</span></footer>
       </main>
+      <aside className={chatOpen ? "pandit-panel open" : "pandit-panel"} aria-label="Pandit cricket assistant">
+        <header className="pandit-header">
+          <div className="pandit-avatar">पं<span>✦</span></div>
+          <div><strong>Pandit</strong><small><i className={agentStatus} /> Gemma 4 · {agentStatus === "ready" ? "Local & ready" : agentStatus === "offline" ? "Offline fallback" : "Checking"}</small></div>
+          <button onClick={() => setChatOpen(false)} aria-label="Close Pandit">×</button>
+        </header>
+        <div className="pandit-context">
+          <span>Watching</span><strong>{match.teams[0]} vs {match.teams[1]}</strong><small>{match.scores[0]} · {match.scores[1]}</small>
+        </div>
+        <div className="chat-messages" aria-live="polite">
+          {messages.map((message, index) => (
+            <div className={`chat-message ${message.role}`} key={`${message.role}-${index}`}>
+              {message.role === "assistant" && <span className="message-mark">✦</span>}
+              <div><p>{message.content}</p>{message.tools && message.tools.length > 0 && <span className="tool-trace">Used {message.tools.join(" + ")}</span>}</div>
+            </div>
+          ))}
+          {chatLoading && <div className="chat-message assistant"><span className="message-mark">✦</span><div className="thinking"><i /><i /><i /></div></div>}
+          <div ref={chatEndRef} />
+        </div>
+        {messages.length < 3 && <div className="suggestion-list">
+          {["What changed in this match?", "Show me the momentum", "Who had the most impact?"].map((suggestion) => <button key={suggestion} onClick={() => void sendChat(undefined, suggestion)}>{suggestion}<span>↗</span></button>)}
+        </div>}
+        <form className="chat-composer" onSubmit={(event) => void sendChat(event)}>
+          <textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} placeholder="Ask Pandit anything about cricket…" rows={2} aria-label="Message Pandit" />
+          <div><span>Natural language → tools → UI</span><button type="submit" disabled={!chatInput.trim() || chatLoading} aria-label="Send message">↑</button></div>
+        </form>
+      </aside>
+      {!chatOpen && <button className="pandit-fab" onClick={() => setChatOpen(true)}><span>✦</span> Ask Pandit</button>}
     </div>
   );
 }

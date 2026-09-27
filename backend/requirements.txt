@@ -3,3 +3,5 @@ beautifulsoup4>=4.12
 fastapi>=0.115,<1
 uvicorn[standard]>=0.34,<1
 httpx>=0.28,<1
+langchain>=1.0,<2
+langchain-core>=1.0,<2

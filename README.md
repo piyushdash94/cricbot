@@ -7,6 +7,7 @@ The repository now has two clear surfaces:
 ```text
 cricbot/
 ├── backend/
+│   ├── agent/         # Pandit orchestration, Gemma client, and LangChain tools
 │   ├── apis/          # FastAPI routes, schemas, and demo data
 │   ├── src/           # Reusable formatting and analytics engine
 │   ├── tests/         # Offline engine and API contract tests
@@ -23,7 +24,10 @@ cricbot/
 - Unicode Manhattan, win-probability, worm, partnership, and phase charts
 - Momentum, turning-point, player-impact, and pitch-profile analytics
 - FastAPI endpoints for the dashboard, scorecard renderer, analytics, and views
-- Responsive interactive UI with match switching, detail tabs, search, theme switching, and summary sharing
+- Multi-source cricket search that routes natural language to match, player, standings, and analytics tools
+- Pandit, a right-side assistant powered by LangChain and the local Gemma 4 completion server
+- Responsive interactive UI with match switching, detail tabs, global search, theme switching, and summary sharing
+- Natural-language UI actions: select a match, open momentum/partnership views, navigate sections, change theme, and copy a summary
 - Stable demo data so the UI remains useful without network access
 
 ## Run locally
@@ -40,6 +44,8 @@ python -m backend.apis
 ```
 
 The API is available at `http://127.0.0.1:8000`, with interactive documentation at `http://127.0.0.1:8000/docs`.
+
+Pandit expects the local Gemma server at `http://127.0.0.1:8080` using the OpenAI-compatible `/v1/completions` contract. Its defaults are in `backend/.env.example`; override `GEMMA_API_BASE`, `GEMMA_MODEL`, or `MAC_SERVING_API_KEY` in your shell when needed. The dashboard and deterministic tools continue to work when Gemma is offline.
 
 ### Frontend
 
@@ -58,6 +64,9 @@ Open `http://localhost:3000`. If `NEXT_PUBLIC_API_URL` is omitted, the frontend 
 |---|---|---|
 | `GET` | `/api/health` | Service health and version |
 | `GET` | `/api/dashboard` | Complete dashboard payload used by the UI |
+| `GET` | `/api/search?q=...` | Route natural-language search across grounded cricket tools |
+| `GET` | `/api/agent/status` | Check the local Gemma model and completion contract |
+| `POST` | `/api/agent/chat` | Ask Pandit a grounded question and receive UI actions |
 | `POST` | `/api/scorecard/render` | Render a compact scorecard from match payloads |
 | `POST` | `/api/analytics` | Impact, momentum, turning points, and pitch profile |
 | `POST` | `/api/views/live` | Format an existing live-match payload |
@@ -101,6 +110,9 @@ print(build_compact_scorecard(
 | `backend/src/scorecard_renderer.py` | Main compact-scorecard renderer |
 | `backend/src/cricbot_views.py` | Match, standings, player, preview, and fetch helpers |
 | `backend/src/impact_lab.py` | Experimental momentum, impact, and pitch analytics |
+| `backend/agent/tools.py` | LangChain search tools and deterministic query routing |
+| `backend/agent/service.py` | Grounded Pandit response orchestration and UI actions |
+| `backend/agent/gemma.py` | Local Gemma `/v1/completions` client and readiness checks |
 | `backend/apis/main.py` | FastAPI application and provider routes |
 
 ## Testing
@@ -108,6 +120,7 @@ print(build_compact_scorecard(
 ```bash
 python backend/tests/test_scorecard.py
 python backend/tests/test_api.py
+python backend/tests/test_agent.py
 
 cd frontend/ui
 npm test

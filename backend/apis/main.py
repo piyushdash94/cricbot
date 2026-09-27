@@ -7,12 +7,15 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.apis.demo_data import dashboard_shell, demo_scorecard
 from backend.apis.schemas import (
+    AgentChatRequest,
     MatchPreviewRequest,
     PlayerCardRequest,
     ScorecardOnlyRequest,
     ScorecardRequest,
     ViewPayload,
 )
+from backend.agent.service import CricbotAgent
+from backend.agent.tools import run_search
 from backend.src.cricbot_views import (
     fetch_match_bundle,
     format_live_matches,
@@ -34,7 +37,7 @@ from backend.src.scorecard_renderer import build_compact_scorecard
 app = FastAPI(
     title="Cricbot API",
     description="Chat-ready scorecards and match analytics from ESPNcricinfo-shaped payloads.",
-    version="1.0.0",
+    version="1.1.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -43,6 +46,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+agent = CricbotAgent()
 
 
 def _innings(scorecard: dict[str, Any]) -> list[dict[str, Any]]:
@@ -98,6 +103,29 @@ def dashboard():
         }
     )
     return payload
+
+
+@app.get("/api/search", tags=["search"])
+def search(q: str, limit: int = 12):
+    query = q.strip()
+    if len(query) < 2:
+        return {"query": query, "results": [], "sources": []}
+    results, sources = run_search(query, limit=max(1, min(limit, 30)))
+    return {"query": query, "results": results, "sources": sources}
+
+
+@app.get("/api/agent/status", tags=["agent"])
+def agent_status():
+    return agent.status()
+
+
+@app.post("/api/agent/chat", tags=["agent"])
+def agent_chat(request: AgentChatRequest):
+    return agent.answer(
+        request.message,
+        history=[item.model_dump() for item in request.history],
+        ui_context=request.ui_context,
+    )
 
 
 @app.post("/api/scorecard/render", tags=["scorecard"])
