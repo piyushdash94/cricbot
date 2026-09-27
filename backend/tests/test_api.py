@@ -75,6 +75,7 @@ class ApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["framework"], "LangGraph")
         self.assertIn("route_tools", [node["id"] for node in payload["nodes"]])
+        self.assertIn("Understand request", [node["label"] for node in payload["nodes"]])
         self.assertTrue(any(edge.get("condition") for edge in payload["edges"]))
 
     @patch.object(agent.gemma, "complete", return_value="RCB's biggest swing came late, and I opened the momentum view.")

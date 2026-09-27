@@ -48,15 +48,15 @@ class PanditState(TypedDict, total=False):
 
 
 GRAPH_NODES = [
-    {"id": "normalize_request", "label": "Understand", "kind": "input", "description": "Normalize the request and recent conversation."},
-    {"id": "route_tools", "label": "Route", "kind": "routing", "description": "Choose the cricket tools relevant to the query."},
-    {"id": "retrieve_facts", "label": "Retrieve", "kind": "tool", "description": "Run the selected deterministic data tools."},
-    {"id": "summarize_context", "label": "Summarize", "kind": "summary", "description": "Compress facts and recent messages for the response."},
-    {"id": "plan_ui", "label": "Plan UI", "kind": "action", "description": "Derive safe dashboard actions and response route."},
-    {"id": "exact_response", "label": "Exact answer", "kind": "response", "description": "Answer exact analytics directly from tool output."},
-    {"id": "gemma_response", "label": "Gemma", "kind": "model", "description": "Ask the local Gemma model to synthesize grounded facts."},
-    {"id": "validate_response", "label": "Validate", "kind": "validation", "description": "Reject unsupported numeric claims and trim repetition."},
-    {"id": "finalize", "label": "Finalize", "kind": "output", "description": "Package the reply, tool trace, and UI actions."},
+    {"id": "normalize_request", "label": "Understand request", "kind": "input", "description": "Normalize the question, dashboard context, and recent conversation."},
+    {"id": "route_tools", "label": "Select tools", "kind": "routing", "description": "Choose match, player, standings, or analytics search tools."},
+    {"id": "retrieve_facts", "label": "Retrieve cricket facts", "kind": "tool", "description": "Run the selected deterministic tools and collect grounded results."},
+    {"id": "summarize_context", "label": "Summarize evidence", "kind": "summary", "description": "Compress tool results and chat history into bounded model context."},
+    {"id": "plan_ui", "label": "Plan UI actions", "kind": "action", "description": "Choose dashboard updates and the exact or model response branch."},
+    {"id": "exact_response", "label": "Exact tool answer", "kind": "response", "description": "Answer analytics and control requests directly from tool output."},
+    {"id": "gemma_response", "label": "Gemma synthesis", "kind": "model", "description": "Use local Gemma 4 to turn grounded facts into natural language."},
+    {"id": "validate_response", "label": "Grounding check", "kind": "validation", "description": "Reject unsupported numbers, repetition, and ungrounded model output."},
+    {"id": "finalize", "label": "Finalize response", "kind": "output", "description": "Package the answer, provenance, trace, and safe UI actions."},
 ]
 
 GRAPH_EDGES = [

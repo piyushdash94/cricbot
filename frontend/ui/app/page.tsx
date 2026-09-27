@@ -82,6 +82,36 @@ type AgentResult = {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
+const DEFAULT_AGENT_GRAPH: AgentGraph = {
+  name: "Pandit Cricket Assistant",
+  version: "1.0",
+  framework: "LangGraph",
+  nodes: [
+    { id: "normalize_request", label: "Understand request", kind: "input", description: "Normalize the question, dashboard context, and recent conversation." },
+    { id: "route_tools", label: "Select tools", kind: "routing", description: "Choose match, player, standings, or analytics search tools." },
+    { id: "retrieve_facts", label: "Retrieve cricket facts", kind: "tool", description: "Run deterministic tools and collect grounded results." },
+    { id: "summarize_context", label: "Summarize evidence", kind: "summary", description: "Compress results and chat history into bounded context." },
+    { id: "plan_ui", label: "Plan UI actions", kind: "action", description: "Choose dashboard updates and the response branch." },
+    { id: "exact_response", label: "Exact tool answer", kind: "response", description: "Answer analytics directly from tool output." },
+    { id: "gemma_response", label: "Gemma synthesis", kind: "model", description: "Turn grounded cricket facts into natural language." },
+    { id: "validate_response", label: "Grounding check", kind: "validation", description: "Reject unsupported numbers or ungrounded output." },
+    { id: "finalize", label: "Finalize response", kind: "output", description: "Package the answer, provenance, trace, and UI actions." },
+  ],
+  edges: [
+    { from: "start", to: "normalize_request" },
+    { from: "normalize_request", to: "route_tools" },
+    { from: "route_tools", to: "retrieve_facts" },
+    { from: "retrieve_facts", to: "summarize_context" },
+    { from: "summarize_context", to: "plan_ui" },
+    { from: "plan_ui", to: "exact_response", condition: "exact analytics or UI command" },
+    { from: "plan_ui", to: "gemma_response", condition: "conversational synthesis" },
+    { from: "gemma_response", to: "validate_response" },
+    { from: "exact_response", to: "finalize" },
+    { from: "validate_response", to: "finalize" },
+    { from: "finalize", to: "end" },
+  ],
+};
+
 const matches: Match[] = [
   {
     id: "rcb-pbks",
@@ -171,7 +201,7 @@ export default function Home() {
   const [chatOpen, setChatOpen] = useState(true);
   const [traceOpen, setTraceOpen] = useState(false);
   const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
-  const [agentGraph, setAgentGraph] = useState<AgentGraph | null>(null);
+  const [agentGraph, setAgentGraph] = useState<AgentGraph>(DEFAULT_AGENT_GRAPH);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [agentStatus, setAgentStatus] = useState<"checking" | "ready" | "offline">("checking");
@@ -217,7 +247,7 @@ export default function Home() {
         if (!response.ok) throw new Error("Graph unavailable");
         setAgentGraph(await response.json());
       })
-      .catch(() => setAgentGraph(null));
+      .catch(() => setAgentGraph(DEFAULT_AGENT_GRAPH));
   }, []);
 
   useEffect(() => {
@@ -357,7 +387,7 @@ export default function Home() {
 
   const currentTrace = traceEvents[traceEvents.length - 1];
   const visitedNodes = new Set(traceEvents.map((event) => event.node));
-  const graphNode = (id: string) => agentGraph?.nodes.find((node) => node.id === id);
+  const graphNode = (id: string) => agentGraph.nodes.find((node) => node.id === id);
   const graphState = (id: string) => chatLoading && currentTrace?.node === id ? "active" : visitedNodes.has(id) ? "complete" : "idle";
 
   return (
@@ -542,7 +572,7 @@ export default function Home() {
       </main>
       <aside className={traceOpen ? "trace-panel open" : "trace-panel"} aria-label="Pandit agent trace">
         <header className="trace-header">
-          <div><span className="trace-kicker">LIVE EXECUTION</span><strong>Agent graph</strong><small>{agentGraph?.framework ?? "LangGraph"} · v{agentGraph?.version ?? "1.0"}</small></div>
+          <div><span className="trace-kicker">LIVE EXECUTION</span><strong>Agent graph</strong><small>{agentGraph.framework} · {agentGraph.nodes.length} nodes · v{agentGraph.version}</small></div>
           <button onClick={() => setTraceOpen(false)} aria-label="Close agent trace">×</button>
         </header>
         <div className="trace-scroll" tabIndex={0} aria-label="Scrollable agent trace content">
@@ -635,6 +665,6 @@ function TeamScore({ initials, name, score, overs, color, reverse = false }: { i
 function GraphNodeCard({ node, state }: { node?: GraphNode; state: "idle" | "active" | "complete" }) {
   return <div className={`graph-node ${state}`} data-node={node?.id ?? "loading"}>
     <span className="node-dot">{state === "complete" ? "✓" : state === "active" ? "●" : "○"}</span>
-    <div><strong>{node?.label ?? "Loading"}</strong><small>{node?.description ?? "Loading graph definition…"}</small></div>
+    <div><strong>{node?.label ?? "Unavailable node"}</strong><small>{node?.description ?? "This graph node is not defined in the current workflow."}</small></div>
   </div>;
 }

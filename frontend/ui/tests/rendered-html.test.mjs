@@ -26,5 +26,8 @@ test("server-renders the Cricbot match centre", async () => {
   assert.match(html, /Win probability/);
   assert.match(html, /Agent graph/);
   assert.match(html, /Toggle agent trace/);
+  assert.match(html, /Understand request/);
+  assert.match(html, /Gemma synthesis/);
+  assert.doesNotMatch(html, /Loading graph definition/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
