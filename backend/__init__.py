@@ -1,0 +1,2 @@
+"""Cricbot backend package."""
+
