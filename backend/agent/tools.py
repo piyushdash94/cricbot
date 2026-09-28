@@ -19,7 +19,7 @@ def _contains(query: str, *values: Any) -> bool:
 def search_matches(query: str) -> list[dict[str, Any]]:
     results = []
     try:
-        archive_matches = search_ipl_archive(query, limit=12)
+        archive_matches = search_ipl_archive(query, limit=100)
     except Exception:
         archive_matches = []
     for match in archive_matches:
@@ -31,26 +31,28 @@ def search_matches(query: str) -> list[dict[str, Any]]:
             "title": match["title"],
             "subtitle": match["status_text"],
             "meta": f"IPL {match['season']} · {scores} · {match['venue']}",
+            "date": match.get("date", ""),
+            "season": match["season"],
+            "match_label": match.get("label", "Match"),
             "action": {
                 "type": "open_match",
                 "series_slug": match["series_slug"],
                 "match_slug": match["match_slug"],
             },
         })
-    for match in dashboard_shell()["matches"]:
-        teams = match["teams"]
-        searchable = [*teams, match["status"], match["result"], match["venue"], "match", "score", "live"]
-        if not query.strip() or _contains(query, *searchable):
-            item = {
-                "id": f"match:{match['id']}",
-                "type": "match",
-                "title": f"{teams[0]} vs {teams[1]}",
-                "subtitle": match["result"],
-                "meta": f"{match['score'][0]} · {match['score'][1]} · {match['venue']}",
-                "action": {"type": "select_match", "match_id": match["id"]},
-            }
-            if not any(row["id"] == item["id"] for row in results):
-                results.append(item)
+    if not archive_matches:
+        for match in dashboard_shell()["matches"]:
+            teams = match["teams"]
+            searchable = [*teams, match["status"], match["result"], match["venue"], "match", "score", "live"]
+            if not query.strip() or _contains(query, *searchable):
+                results.append({
+                    "id": f"match:{match['id']}",
+                    "type": "match",
+                    "title": f"{teams[0]} vs {teams[1]}",
+                    "subtitle": match["result"],
+                    "meta": f"{match['score'][0]} · {match['score'][1]} · {match['venue']}",
+                    "action": {"type": "select_match", "match_id": match["id"]},
+                })
     return results
 
 

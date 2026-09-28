@@ -11,6 +11,7 @@ def docs_catalog():
             "The browser only consumes Cricbot's canonical JSON; provider-specific shapes stay in backend/src.",
             "Historical coverage is honest: full ball feed → commentary → over summaries → unavailable.",
             "Pandit retrieves deterministic facts first and uses local Gemma only to phrase grounded answers.",
+            "Team typos and relative dates are resolved before retrieval; the resolved entities remain visible in the graph trace.",
         ],
         "sources": [
             {"name": "cricdata / ESPNcricinfo", "use": "IPL schedules, results, match info, scorecards, overs, partnerships and commentary", "mode": "live upstream, cached in process"},
@@ -28,6 +29,7 @@ def docs_catalog():
             {"method": "GET", "path": "/api/docs/catalog", "use": "This documentation", "response": "Machine-readable platform catalog"},
         ],
         "tools": [
+            {"name": "entity resolver", "owner": "extract_entities", "use": "Resolve team typos, players, years, match stages, venues, conversational carry-over, and list intent"},
             {"name": "search_matches", "owner": "retrieve_facts", "use": "Search the IPL archive by team, season, venue, status or result"},
             {"name": "search_players", "owner": "retrieve_facts", "use": "Find batting and bowling performances in loaded scorecards"},
             {"name": "search_standings", "owner": "retrieve_facts", "use": "Read points-table facts"},
@@ -38,6 +40,7 @@ def docs_catalog():
         "states": [
             {"name": "message/history/ui_context", "meaning": "Raw request plus the currently visible season, match and tab"},
             {"name": "query/compact_history", "meaning": "Normalized bounded input"},
+            {"name": "entities/retrieval_query", "meaning": "Resolved teams, players, seasons, terms, corrections, intent, and the canonical query used by tools"},
             {"name": "tool_names/results", "meaning": "Selected deterministic tools and their grounded facts"},
             {"name": "compact_results", "meaning": "Small evidence packet passed to Gemma"},
             {"name": "actions/response_route", "meaning": "Safe UI changes and exact-vs-model branch"},

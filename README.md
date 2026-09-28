@@ -26,9 +26,10 @@ cricbot/
 - FastAPI endpoints for the IPL 2023–2025 archive, canonical match detail, scorecards, analytics, and views
 - Multi-source cricket search that routes natural language to match, player, standings, and analytics tools
 - Pandit, a right-side assistant powered by an observable LangGraph workflow and the local Gemma 4 completion server
+- A deterministic entity-resolution node that corrects team typos, resolves relative years, identifies teams/players/match terms/venues, carries conversational context, and preserves list intent
 - A collapsible live trace pane showing graph traversal, conditional branches, intermediate summaries, state patches, and UI actions
 - Archive-first UI with season filters, historical match search, scorecards, available ball-by-ball commentary, provenance, and analytics
-- Natural-language UI actions: open a historical match, switch match tabs, navigate sections, and change theme
+- Natural-language UI actions: filter the archive, open a historical match, switch match tabs, navigate sections, and change theme
 - In-app Docs drawer describing every public contract, source, tool owner, LangGraph state, transition, and fallback level
 - Stable demo data so the UI remains useful without network access
 
@@ -58,7 +59,30 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`. If `NEXT_PUBLIC_API_URL` is omitted, the frontend calls `http://127.0.0.1:8000`. The backend automatically labels and uses its local demo fallback if the cricket provider is unavailable.
+Open `http://localhost:3000`. The backend automatically labels and uses its local demo fallback if the cricket provider is unavailable.
+
+Leave `NEXT_PUBLIC_API_URL` blank for the recommended local setup. The frontend then calls same-origin `/api` routes, and the Vite development server proxies those requests to FastAPI at `http://127.0.0.1:8000`. Set the variable only when the API is hosted on a different origin.
+
+### Optional local Gemma service
+
+Pandit uses deterministic tools even when Gemma is offline. To enable conversational synthesis on the configured Mac serving project, run this in a separate terminal before starting Cricbot:
+
+```bash
+cd /Users/saketm10/Projects/foundation-ai-platform/mac-serving
+.venv/bin/mac-serve serve
+```
+
+Confirm readiness at `http://127.0.0.1:8080/readyz`. Never expose port `8080` directly to the internet.
+
+## Share a temporary preview with ngrok
+
+Start the backend and frontend as described above, then run:
+
+```bash
+ngrok http 3000
+```
+
+Share the HTTPS forwarding URL printed by ngrok. The single frontend tunnel also carries `/api` traffic through the local proxy, so search, match details, documentation, and Pandit work without a second public tunnel. Your friend may need to accept ngrok's one-time browser warning. The link remains available only while the Mac, Cricbot services, and ngrok process are running.
 
 ## API surface
 
@@ -120,6 +144,7 @@ print(build_compact_scorecard(
 | `backend/src/ipl_data.py` | IPL archive access, provider normalization, and ball-data fallback ladder |
 | `backend/src/impact_lab.py` | Experimental momentum, impact, and pitch analytics |
 | `backend/agent/tools.py` | LangChain search tools and deterministic query routing |
+| `backend/agent/entities.py` | Team/player/year/venue extraction, typo correction, temporal resolution, and conversational carry-over |
 | `backend/agent/service.py` | LangGraph state, nodes, trace events, grounded responses, and UI actions |
 | `backend/agent/gemma.py` | Local Gemma `/v1/completions` client and readiness checks |
 | `backend/apis/main.py` | FastAPI application and provider routes |

@@ -25,8 +25,8 @@ type MatchDetail = {
   sources: { name: string; provider: string; available: boolean }[];
 };
 type UiAction = {
-  type: "open_match" | "select_match" | "set_match_tab" | "set_view" | "navigate" | "theme" | "copy_summary";
-  series_slug?: string; match_slug?: string; match_id?: string; tab?: MatchTab; view?: string; section?: string; value?: "light" | "dark";
+  type: "open_match" | "select_match" | "set_archive_filters" | "set_match_tab" | "set_view" | "navigate" | "theme" | "copy_summary";
+  series_slug?: string; match_slug?: string; match_id?: string; season?: number; query?: string; tab?: MatchTab; view?: string; section?: string; value?: "light" | "dark";
 };
 type ChatMessage = { role: "user" | "assistant"; content: string; tools?: string[] };
 type GraphNode = { id: string; label: string; kind: string; description: string };
@@ -47,12 +47,15 @@ type DocsCatalog = {
 };
 type MatchTab = "overview" | "scorecard" | "balls" | "analytics";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+// Same-origin by default: the local Vite server proxies /api to FastAPI. This
+// keeps shared tunnel URLs functional without exposing the model service.
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 const SEASONS = [2025, 2024, 2023];
 const DEFAULT_GRAPH: AgentGraph = {
-  name: "Pandit Cricket Assistant", version: "1.1", framework: "LangGraph",
+  name: "Pandit Cricket Assistant", version: "1.2", framework: "LangGraph",
   nodes: [
     ["normalize_request", "Understand request", "input", "Normalize the question, visible match, and recent conversation."],
+    ["extract_entities", "Resolve cricket entities", "entity", "Correct typos and resolve teams, players, years, match terms, venues, and list intent."],
     ["route_tools", "Select tools", "routing", "Choose archive, player, standings, or analytics retrieval."],
     ["retrieve_facts", "Retrieve cricket facts", "tool", "Run deterministic tools and collect grounded results."],
     ["summarize_context", "Summarize evidence", "summary", "Compress facts and history into bounded context."],
@@ -203,6 +206,17 @@ export default function Home() {
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, chatLoading]);
 
   function applyAction(action: UiAction) {
+    if (action.type === "set_archive_filters") {
+      if (action.season && SEASONS.includes(action.season)) setSeason(action.season);
+      setQuery(action.query ?? "");
+      setSelected(null);
+      setDetail(null);
+      const url = new URL(window.location.href);
+      url.searchParams.delete("series");
+      url.searchParams.delete("match");
+      window.history.pushState({}, "", url);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
     if (action.type === "open_match" && action.series_slug && action.match_slug) {
       const found = matches.find((item) => item.series_slug === action.series_slug && item.match_slug === action.match_slug);
       if (found) void openMatch(found);

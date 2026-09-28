@@ -29,6 +29,7 @@ test("server-renders the Cricbot IPL archive and agent workspace", async () => {
   assert.match(html, /Agent graph/);
   assert.match(html, /Toggle agent trace/);
   assert.match(html, /Understand request/);
+  assert.match(html, /Resolve cricket entities/);
   assert.match(html, /Gemma synthesis/);
   assert.doesNotMatch(html, /Loading graph definition/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
