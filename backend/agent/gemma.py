@@ -37,22 +37,30 @@ class GemmaCompletionClient:
         temperature: float = 0.2,
         top_p: float = 0.95,
     ) -> str:
-        response = self.client.post(
-            "/v1/completions",
-            json={
-                "model": self.model,
-                "prompt": prompt,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "top_p": top_p,
-                "stream": False,
-                "stop": ["\n\n"],
-            },
-        )
+        try:
+            response = self.client.post(
+                "/v1/completions",
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "stream": False,
+                    "stop": ["\n\n"],
+                },
+            )
+        except httpx.HTTPError as exc:
+            # Connection and timeout failures must reach callers as RuntimeError
+            # so Pandit can fall back to its deterministic reply.
+            raise RuntimeError(f"Gemma request failed: {exc}") from exc
         if response.status_code != 200:
             diagnostic = response.text[:300]
             raise RuntimeError(f"Gemma request failed ({response.status_code}): {diagnostic}")
-        payload: dict[str, Any] = response.json()
+        try:
+            payload: dict[str, Any] = response.json()
+        except ValueError as exc:
+            raise RuntimeError("Gemma response was not valid JSON") from exc
         choices = payload.get("choices") or []
         if not choices or "text" not in choices[0]:
             raise RuntimeError("Gemma response did not contain choices[0].text")

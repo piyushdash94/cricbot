@@ -77,6 +77,55 @@ function dismissal(value: Batter["dismissal"]) {
   return value?.long ?? value?.short ?? "";
 }
 
+function formatToss(value: MatchDetail["toss"]) {
+  if (typeof value === "string") return value || "Unavailable";
+  const text = value?.text ?? value?.long ?? value?.summary;
+  if (typeof text === "string") return text;
+  const winner = value?.winner ?? value?.team;
+  const decision = value?.decision ?? value?.choice;
+  if (typeof winner === "string" && typeof decision === "string") return `${winner} chose to ${decision}`;
+  return "Unavailable";
+}
+
+function plural(count: number, word: string) {
+  return `${count} ${word}${count === 1 ? "" : "es"}`;
+}
+
+function seasonFromSlug(seriesSlug: string, fallback: number) {
+  return SEASONS.find((year) => seriesSlug.includes(String(year))) ?? fallback;
+}
+
+function placeholderMatch(seriesSlug: string, matchSlug: string, season: number): ArchiveMatch {
+  return { id: matchSlug, season, series_slug: seriesSlug, match_slug: matchSlug, title: "IPL match", date: "", status: "", status_text: "", venue: "", teams: [], series_name: `IPL ${season}` };
+}
+
+function matchSummary(match: ArchiveMatch) {
+  const teams = match.teams.map((team) => `${team.abbr} ${scoreLabel(team)}`).join(" vs ");
+  return [match.title, teams, match.status_text, [match.venue, formatDate(match.date)].filter(Boolean).join(" · ")].filter(Boolean).join("\n");
+}
+
+function setMatchUrl(match: ArchiveMatch | null) {
+  const url = new URL(window.location.href);
+  if (match) {
+    url.searchParams.set("series", match.series_slug);
+    url.searchParams.set("match", match.match_slug);
+  } else {
+    url.searchParams.delete("series");
+    url.searchParams.delete("match");
+  }
+  if (url.href !== window.location.href) window.history.pushState({}, "", url);
+}
+
+function tabForAction(action: UiAction): MatchTab | null {
+  if (action.type === "set_match_tab" && action.tab) return action.tab;
+  const target = action.view ?? action.section;
+  if (action.type !== "set_view" && action.type !== "navigate") return null;
+  if (target === "scorecard" || target === "players") return "scorecard";
+  if (target === "analytics" || target === "momentum") return "analytics";
+  if (target === "balls" || target === "commentary") return "balls";
+  return null;
+}
+
 function formatDate(value: string) {
   if (!value) return "Date unavailable";
   const parsed = new Date(value);
@@ -111,10 +160,20 @@ export default function Home() {
   ]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
+  const [toast, setToast] = useState("");
   const detailRef = useRef<HTMLElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const archiveRequest = useRef(0);
+  const detailRequest = useRef(0);
+
+  const notify = useCallback((message: string) => {
+    setToast(message);
+    window.setTimeout(() => setToast((current) => current === message ? "" : current), 2400);
+  }, []);
 
   const loadArchive = useCallback(async (year: number, term: string) => {
+    const request = ++archiveRequest.current;
     setArchiveLoading(true);
     setArchiveError("");
     try {
@@ -122,44 +181,50 @@ export default function Home() {
       const response = await fetch(`${API_BASE}/api/ipl/matches?${params}`);
       if (!response.ok) throw new Error("Archive unavailable");
       const payload = await response.json();
+      if (request !== archiveRequest.current) return;
       setMatches(payload.matches ?? []);
       setTotal(payload.pagination?.total ?? 0);
       setArchiveSource(payload.source ?? "");
       setApiStatus("connected");
     } catch {
+      if (request !== archiveRequest.current) return;
       setMatches([]);
       setTotal(0);
       setArchiveError("The local API is not responding. Start the backend and try again.");
       setApiStatus("offline");
     } finally {
-      setArchiveLoading(false);
+      if (request === archiveRequest.current) setArchiveLoading(false);
     }
   }, []);
 
-  const openMatch = useCallback(async (match: ArchiveMatch, pushHistory = true) => {
+  const openMatch = useCallback(async (match: ArchiveMatch, pushHistory = true, tab: MatchTab = "overview") => {
+    const request = ++detailRequest.current;
     setSelected(match);
     setDetail(null);
     setDetailLoading(true);
-    setMatchTab("overview");
+    setMatchTab(tab);
     setInningFilter(0);
-    if (pushHistory && typeof window !== "undefined") {
-      const url = new URL(window.location.href);
-      url.searchParams.set("series", match.series_slug);
-      url.searchParams.set("match", match.match_slug);
-      window.history.pushState({}, "", url);
-    }
+    if (pushHistory) setMatchUrl(match);
     window.setTimeout(() => detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 40);
     try {
       const response = await fetch(`${API_BASE}/api/ipl/matches/${encodeURIComponent(match.series_slug)}/${encodeURIComponent(match.match_slug)}`);
       if (!response.ok) throw new Error("Match unavailable");
       const payload = await response.json() as MatchDetail;
+      if (request !== detailRequest.current) return;
       setDetail(payload);
       setSelected(payload.match);
     } catch {
-      setDetail(null);
+      if (request === detailRequest.current) setDetail(null);
     } finally {
-      setDetailLoading(false);
+      if (request === detailRequest.current) setDetailLoading(false);
     }
+  }, []);
+
+  const clearMatch = useCallback(() => {
+    detailRequest.current += 1;
+    setSelected(null);
+    setDetail(null);
+    setDetailLoading(false);
   }, []);
 
   useEffect(() => {
@@ -179,13 +244,13 @@ export default function Home() {
       const seriesSlug = params.get("series");
       const matchSlug = params.get("match");
       if (!seriesSlug || !matchSlug) return;
-      const linkedSeason = SEASONS.find((year) => seriesSlug.includes(String(year))) ?? season;
+      const linkedSeason = seasonFromSlug(seriesSlug, season);
       if (linkedSeason !== season) {
         setSeason(linkedSeason);
         return;
       }
       const found = matches.find((item) => item.series_slug === seriesSlug && item.match_slug === matchSlug);
-      void openMatch(found ?? { id: matchSlug, season: linkedSeason, series_slug: seriesSlug, match_slug: matchSlug, title: "IPL match", date: "", status: "", status_text: "", venue: "", teams: [], series_name: `IPL ${linkedSeason}` }, false);
+      void openMatch(found ?? placeholderMatch(seriesSlug, matchSlug, linkedSeason), false);
     }, 0);
     return () => window.clearTimeout(request);
   }, [archiveLoading, matches, openMatch, season, selected]);
@@ -203,41 +268,103 @@ export default function Home() {
     });
   }, []);
 
-  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, chatLoading]);
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, [messages, chatLoading]);
 
-  function applyAction(action: UiAction) {
-    if (action.type === "set_archive_filters") {
-      if (action.season && SEASONS.includes(action.season)) setSeason(action.season);
-      setQuery(action.query ?? "");
-      setSelected(null);
-      setDetail(null);
-      const url = new URL(window.location.href);
-      url.searchParams.delete("series");
-      url.searchParams.delete("match");
-      window.history.pushState({}, "", url);
-      window.scrollTo({ top: 0, behavior: "smooth" });
+  // Pandit overlays the page below 1240px, so start closed there.
+  useEffect(() => {
+    const timer = window.setTimeout(() => { if (window.matchMedia("(max-width: 1240px)").matches) setChatOpen(false); }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  // Keep Back/Forward in sync with the match encoded in the URL.
+  useEffect(() => {
+    const onPop = () => {
+      const params = new URL(window.location.href).searchParams;
+      const seriesSlug = params.get("series");
+      const matchSlug = params.get("match");
+      if (seriesSlug && matchSlug) {
+        const linkedSeason = seasonFromSlug(seriesSlug, season);
+        const found = matches.find((item) => item.series_slug === seriesSlug && item.match_slug === matchSlug);
+        void openMatch(found ?? placeholderMatch(seriesSlug, matchSlug, linkedSeason), false);
+      } else clearMatch();
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [clearMatch, matches, openMatch, season]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (traceOpen) setTraceOpen(false);
+        else if (docsOpen) setDocsOpen(false);
+        else if (chatOpen && window.matchMedia("(max-width: 1240px)").matches) setChatOpen(false);
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      const typing = target?.closest("input, textarea, [contenteditable='true']");
+      if (event.key === "/" && !typing && !event.metaKey && !event.ctrlKey) {
+        event.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [chatOpen, docsOpen, traceOpen]);
+
+  async function copyText(text: string, message: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      notify(message);
+    } catch {
+      notify("Copy failed. Your browser blocked clipboard access.");
     }
-    if (action.type === "open_match" && action.series_slug && action.match_slug) {
-      const found = matches.find((item) => item.series_slug === action.series_slug && item.match_slug === action.match_slug);
-      if (found) void openMatch(found);
-      else {
-        void openMatch({ id: action.match_slug, season, series_slug: action.series_slug, match_slug: action.match_slug, title: "IPL match", date: "", status: "", status_text: "", venue: "", teams: [], series_name: `IPL ${season}` });
+  }
+
+  function shareMatch() {
+    if (!selected) return;
+    void copyText(`${matchSummary(selected)}\n${window.location.href}`, "Match summary and link copied");
+  }
+
+  function showTab(tab: MatchTab) {
+    setMatchTab(tab);
+    detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function applyActions(actions: UiAction[]) {
+    // Open a match before switching tabs: opening resets the workspace.
+    const opening = actions.find((action) => action.type === "open_match" || action.type === "select_match");
+    // The planner puts the tab the user explicitly asked for first.
+    const requestedTab = actions.map(tabForAction).find((tab) => tab !== null) ?? null;
+    let opened = false;
+    if (opening?.type === "open_match" && opening.series_slug && opening.match_slug) {
+      const found = matches.find((item) => item.series_slug === opening.series_slug && item.match_slug === opening.match_slug);
+      void openMatch(found ?? placeholderMatch(opening.series_slug, opening.match_slug, seasonFromSlug(opening.series_slug, season)), true, requestedTab ?? "overview");
+      opened = true;
+    }
+    if (opening?.type === "select_match" && opening.match_id) {
+      const found = matches.find((item) => item.id === opening.match_id);
+      if (found) {
+        void openMatch(found, true, requestedTab ?? "overview");
+        opened = true;
       }
     }
-    if (action.type === "set_match_tab" && action.tab) {
-      setMatchTab(action.tab);
-      detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    for (const action of actions) {
+      if (action.type === "set_archive_filters") {
+        if (action.season && SEASONS.includes(action.season)) setSeason(action.season);
+        setQuery(action.query ?? "");
+        clearMatch();
+        setMatchUrl(null);
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      }
+      if (action.type === "theme" && action.value) setDark(action.value === "dark");
+      if (action.type === "copy_summary" && selected) shareMatch();
     }
-    if (action.type === "theme" && action.value) setDark(action.value === "dark");
+    if (!opened && requestedTab && selected) showTab(requestedTab);
   }
 
   function closeMatch() {
-    setSelected(null);
-    setDetail(null);
-    const url = new URL(window.location.href);
-    url.searchParams.delete("series");
-    url.searchParams.delete("match");
-    window.history.pushState({}, "", url);
+    clearMatch();
+    setMatchUrl(null);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -285,7 +412,7 @@ export default function Home() {
       if (!result) throw new Error("No result");
       const finalResult = result as AgentResult;
       setMessages((current) => [...current, { role: "assistant", content: finalResult.reply, tools: finalResult.tool_calls?.map((item) => item.name.replace("search_", "")) }]);
-      finalResult.ui_actions?.forEach(applyAction);
+      applyActions(finalResult.ui_actions ?? []);
       setAgentStatus("ready");
     } catch {
       setMessages((current) => [...current, { role: "assistant", content: "I lost the local backend for a moment. Your archive view is safe—once it’s back, send that again and I’ll pick up from here." }]);
@@ -301,10 +428,10 @@ export default function Home() {
       <aside className="sidebar">
         <button className="brand" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}><span className="brand-mark" /><span>CRIC<span>BOT</span></span></button>
         <nav>
-          <button className="nav-item active" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}><span className="nav-icon">⌕</span><span>IPL archive</span></button>
-          <button className="nav-item" onClick={() => detailRef.current?.scrollIntoView({ behavior: "smooth" })}><span className="nav-icon">◉</span><span>Match detail</span></button>
-          <button className="nav-item" onClick={() => setChatOpen(true)}><span className="nav-icon">✦</span><span>Pandit</span></button>
-          <button className="nav-item" onClick={() => setDocsOpen(true)}><span className="nav-icon">≡</span><span>Docs</span></button>
+          <button className={`nav-item${!selected && !docsOpen ? " active" : ""}`} onClick={() => { setDocsOpen(false); window.scrollTo({ top: 0, behavior: "smooth" }); }}><span className="nav-icon">⌕</span><span>IPL archive</span></button>
+          <button className={`nav-item${selected && !docsOpen ? " active" : ""}`} onClick={() => { setDocsOpen(false); detailRef.current?.scrollIntoView({ behavior: "smooth" }); }}><span className="nav-icon">◉</span><span>Match detail</span></button>
+          <button className={`nav-item${chatOpen ? " open" : ""}`} onClick={() => setChatOpen((value) => !value)} aria-pressed={chatOpen}><span className="nav-icon">✦</span><span>Pandit</span></button>
+          <button className={`nav-item${docsOpen ? " active" : ""}`} onClick={() => setDocsOpen((value) => !value)} aria-pressed={docsOpen}><span className="nav-icon">≡</span><span>Docs</span></button>
         </nav>
         <div className="sidebar-foot">
           <div className="api-indicator"><span className={`status-dot ${apiStatus}`} /><div><strong>{apiStatus === "connected" ? "Local API online" : apiStatus === "offline" ? "API offline" : "Checking API"}</strong><small>{archiveSource || "127.0.0.1:8000"}</small></div></div>
@@ -317,7 +444,7 @@ export default function Home() {
           <div className="top-actions">
             <button className="docs-button" onClick={() => setDocsOpen(true)}>Docs <span>API + agent</span></button>
             <button className="icon-button" onClick={() => setDark((value) => !value)} aria-label="Toggle color theme">{dark ? "☼" : "☾"}</button>
-            <button className="pandit-toggle" onClick={() => setChatOpen((value) => !value)}><span>✦</span> Pandit</button>
+            <button className="pandit-toggle" onClick={() => setChatOpen((value) => !value)} aria-pressed={chatOpen}><span>✦</span> Pandit</button>
           </div>
         </header>
 
@@ -327,20 +454,20 @@ export default function Home() {
             <h2>Don’t start with a match.<br /><em>Find the story first.</em></h2>
             <p>Search IPL history by team, venue, result, or season. Open any match for its scorecard, available ball-by-ball detail, and match intelligence.</p>
           </div>
-          <div className="archive-stat"><strong>{total || "—"}</strong><span>matches in {season}</span><small>{archiveSource || "Connecting to archive…"}</small></div>
+          <div className="archive-stat"><strong>{archiveLoading ? "…" : apiStatus === "offline" ? "—" : total}</strong><span>{total === 1 ? "match" : "matches"} in {season}</span><small>{archiveSource || "Connecting to archive…"}</small></div>
         </section>
 
         <section className="archive-controls" aria-label="IPL archive controls">
-          <div className="season-tabs">{SEASONS.map((year) => <button className={season === year ? "active" : ""} key={year} onClick={() => { setSeason(year); setSelected(null); setDetail(null); }}>{year}</button>)}</div>
-          <label className="archive-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search RCB, Chennai, Wankhede, won by…" aria-label="Search historical IPL matches" />{query && <button onClick={() => setQuery("")} aria-label="Clear search">×</button>}</label>
+          <div className="season-tabs">{SEASONS.map((year) => <button className={season === year ? "active" : ""} aria-pressed={season === year} key={year} onClick={() => { if (year === season) return; setSeason(year); clearMatch(); setMatchUrl(null); }}>{year}</button>)}</div>
+          <label className="archive-search"><span>⌕</span><input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") { setQuery(""); event.currentTarget.blur(); } }} placeholder="Search RCB, Chennai, Wankhede, won by…" aria-label="Search historical IPL matches" />{query ? <button onClick={() => { setQuery(""); searchRef.current?.focus(); }} aria-label="Clear search">×</button> : <kbd title="Press / to search">/</kbd>}</label>
         </section>
 
         <section className="match-catalog" aria-live="polite">
-          <div className="section-heading"><div><p className="section-kicker">{search ? "SEARCH RESULTS" : `IPL ${season}`}</p><h3>{archiveLoading ? "Searching the archive…" : `${total} matches`}</h3></div><span>Click a match to open the full workspace</span></div>
+          <div className="section-heading"><div><p className="section-kicker">{search ? "SEARCH RESULTS" : `IPL ${season}`}</p><h3>{archiveLoading ? "Searching the archive…" : plural(total, "match")}</h3></div><span>Click a match to open the full workspace</span></div>
           {archiveError && <div className="error-state"><strong>Archive unavailable</strong><p>{archiveError}</p><button onClick={() => void loadArchive(season, search)}>Try again</button></div>}
           {!archiveError && archiveLoading && <div className="match-grid skeleton-grid">{Array.from({ length: 6 }).map((_, index) => <div className="match-card skeleton" key={index} />)}</div>}
-          {!archiveLoading && !archiveError && matches.length === 0 && <div className="empty-state"><strong>No matches found</strong><p>Try a shorter team name, venue, or result phrase.</p></div>}
-          {!archiveLoading && <div className="match-grid">{matches.map((match) => <button className={`match-card${selected?.id === match.id ? " selected" : ""}`} key={`${match.season}-${match.id}`} onClick={() => void openMatch(match)}>
+          {!archiveLoading && !archiveError && matches.length === 0 && <div className="empty-state"><strong>No matches found</strong><p>{search ? <>Nothing in IPL {season} matches “{search}”. Try a shorter team name, venue, or result phrase.</> : `No archived matches are available for IPL ${season} yet.`}</p>{search && <button onClick={() => setQuery("")}>Clear search</button>}</div>}
+          {!archiveLoading && <div className="match-grid">{matches.map((match) => <button className={`match-card${selected?.id === match.id ? " selected" : ""}`} aria-current={selected?.id === match.id ? "true" : undefined} key={`${match.season}-${match.id}`} onClick={() => void openMatch(match)}>
             <div className="match-card-top"><span>{formatDate(match.date)}</span><em>{match.status === "live" ? "LIVE" : match.status || "RESULT"}</em></div>
             <div className="match-teams">{match.teams.map((team) => <div key={team.abbr}><i style={{ background: team.color }}>{team.abbr.slice(0, 2)}</i><span><strong>{team.abbr}</strong><small>{team.name}</small></span><b>{scoreLabel(team)}</b></div>)}</div>
             <p>{match.status_text}</p><footer><span>{match.venue}</span><b>Open match →</b></footer>
@@ -351,15 +478,15 @@ export default function Home() {
           {!selected && <div className="workspace-empty"><span>◉</span><div><p className="section-kicker">MATCH WORKSPACE</p><h3>Select any IPL match</h3><p>The scorecard, deliveries, analytics, and Pandit context will appear here.</p></div></div>}
           {selected && <>
             <div className="match-hero">
-              <button className="back-link" onClick={closeMatch}>← Back to archive</button>
+              <div className="hero-actions"><button className="back-link" onClick={closeMatch}>← Back to archive</button><button className="share-button" onClick={shareMatch}>Copy summary + link</button></div>
               <div className="match-meta"><span>{selected.series_name}</span><span>{formatDate(selected.date)}</span><span>{selected.venue}</span></div>
               <div className="match-scoreboard">{selected.teams.map((team) => <div className="score-team" key={team.abbr}><i style={{ borderColor: team.color }}>{team.abbr}</i><span><small>{team.name}</small><strong>{scoreLabel(team)}</strong><em>{team.score_info}</em></span></div>)}</div>
-              <div className="result-strip"><span>Result</span><strong>{selected.status_text}</strong></div>
+              <div className="result-strip"><span>Result</span><strong>{selected.status_text || (detailLoading ? "Loading…" : "Unavailable")}</strong></div>
             </div>
-            <div className="detail-tabs">{(["overview", "scorecard", "balls", "analytics"] as MatchTab[]).map((tab) => <button className={matchTab === tab ? "active" : ""} key={tab} onClick={() => setMatchTab(tab)}>{tab === "balls" ? "Ball by ball" : tab}</button>)}</div>
+            <div className="detail-tabs" role="tablist" aria-label="Match sections">{(["overview", "scorecard", "balls", "analytics"] as MatchTab[]).map((tab) => <button role="tab" aria-selected={matchTab === tab} className={matchTab === tab ? "active" : ""} key={tab} onClick={() => setMatchTab(tab)}>{tab === "balls" ? "Ball by ball" : tab}</button>)}</div>
             {detailLoading && <div className="detail-loading"><span /><strong>Building this match workspace…</strong><small>Scorecard → commentary → analytics</small></div>}
             {!detailLoading && !detail && <div className="error-state"><strong>Match detail unavailable</strong><p>The archive card is still usable. Try this match again when the provider responds.</p><button onClick={() => void openMatch(selected, false)}>Retry</button></div>}
-            {detail && matchTab === "overview" && <Overview detail={detail} onTab={setMatchTab} />}
+            {detail && matchTab === "overview" && <Overview detail={detail} onTab={showTab} />}
             {detail && matchTab === "scorecard" && <Scorecard innings={detail.innings} />}
             {detail && matchTab === "balls" && <BallByBall detail={detail} balls={visibleBalls} filter={inningFilter} onFilter={setInningFilter} />}
             {detail && matchTab === "analytics" && <Analytics detail={detail} />}
@@ -371,24 +498,81 @@ export default function Home() {
       <DocsDrawer open={docsOpen} docs={docs} onClose={() => setDocsOpen(false)} />
       <TraceDrawer open={traceOpen} graph={graph} trace={trace} loading={chatLoading} onClose={() => setTraceOpen(false)} />
       <aside className={`pandit-panel${chatOpen ? " open" : ""}`} aria-label="Pandit cricket assistant">
-        <header className="pandit-header"><span className="pandit-avatar">P<i>✦</i></span><div><strong>Pandit</strong><small><i className={agentStatus} />{agentStatus === "ready" ? "Local Gemma ready" : agentStatus === "offline" ? "Deterministic mode" : "Checking model"}</small></div><button className={traceOpen ? "active" : ""} onClick={() => setTraceOpen((value) => !value)} aria-label="Toggle agent trace">⌘{trace.length ? <b>{trace.length}</b> : null}</button><button onClick={() => setChatOpen(false)}>×</button></header>
+        <header className="pandit-header"><span className="pandit-avatar">P<i>✦</i></span><div><strong>Pandit</strong><small><i className={agentStatus} />{agentStatus === "ready" ? "Local Gemma ready" : agentStatus === "offline" ? "Deterministic mode" : "Checking model"}</small></div><button className={traceOpen ? "active" : ""} onClick={() => setTraceOpen((value) => !value)} aria-label="Toggle agent trace">⌘{trace.length ? <b>{trace.length}</b> : null}</button><button onClick={() => setChatOpen(false)} aria-label="Close Pandit">×</button></header>
         <div className="pandit-context"><span>CONTEXT</span><strong>{selected?.title ?? `IPL ${season} archive`}</strong><small>{selected ? matchTab : `${total} matches`}</small></div>
-        <div className="chat-messages">{messages.map((message, index) => <div className={`chat-message ${message.role}`} key={`${message.role}-${index}`}>
+        <div className="chat-messages" aria-live="polite">{messages.map((message, index) => <div className={`chat-message ${message.role}`} key={`${message.role}-${index}`}>
           {message.role === "assistant" && <span className="message-mark">P</span>}<div><p>{message.content}</p>{message.tools?.length ? <small>Used {message.tools.join(" · ")}</small> : null}</div>
         </div>)}{chatLoading && <div className="chat-message"><span className="message-mark">P</span><div className="thinking"><i /><i /><i /></div></div>}<div ref={chatEndRef} /></div>
-        <div className="suggestion-list">{(selected ? ["Show me the ball-by-ball", "Who had the biggest impact?"] : [`Find RCB matches in ${season}`, "Show me the 2024 final"]).map((prompt) => <button key={prompt} onClick={() => void sendChat(undefined, prompt)}>{prompt}<span>↗</span></button>)}</div>
-        <form className="chat-composer" onSubmit={sendChat}><textarea rows={2} value={chatInput} onChange={(event) => setChatInput(event.target.value)} placeholder="Ask Pandit anything about IPL…" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} /><div><span>Grounded tools + local Gemma</span><button disabled={!chatInput.trim() || chatLoading}>↑</button></div></form>
+        <div className="suggestion-list">{(selected ? ["Show me the ball-by-ball", "Who had the biggest impact?"] : [`Find RCB matches in ${season}`, "Show me the 2024 final"]).map((prompt) => <button key={prompt} disabled={chatLoading} onClick={() => void sendChat(undefined, prompt)}>{prompt}<span>↗</span></button>)}</div>
+        <form className="chat-composer" onSubmit={sendChat}><textarea rows={2} aria-label="Message Pandit" value={chatInput} onChange={(event) => setChatInput(event.target.value)} placeholder="Ask Pandit anything about IPL…" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendChat(); } }} /><div><span>Grounded tools + local Gemma</span><button disabled={!chatInput.trim() || chatLoading} aria-label="Send message">↑</button></div></form>
       </aside>
       {!chatOpen && <button className="pandit-fab" onClick={() => setChatOpen(true)}><span>✦</span> Ask Pandit</button>}
+      <div className={`toast${toast ? " show" : ""}`} role="status" aria-live="polite">{toast}</div>
     </div>
   );
 }
 
+type StoryLine = { kicker: string; text: string };
+
+// Impact rows carry no team, so recover it from the scorecard: batters play
+// for the innings team, bowlers for the other side.
+function playerTeams(innings: Innings[]) {
+  const teams = new Map<string, string>();
+  const names = innings.map((inning) => inning.team);
+  for (const inning of innings) {
+    const fielding = names.find((name) => name !== inning.team) ?? "";
+    inning.batters.forEach((batter) => teams.set(batter.name, inning.team));
+    inning.bowlers.forEach((bowler) => { if (!teams.has(bowler.name)) teams.set(bowler.name, fielding); });
+  }
+  return teams;
+}
+
+function roleLabel(role: string) {
+  return role === "bowl" ? "bowling" : role === "bat" ? "batting" : role;
+}
+
+// A deterministic recap: every number comes straight from the scorecard,
+// analytics, or commentary payload, so nothing here can be hallucinated.
+function buildMatchStory(detail: MatchDetail): { lines: StoryLine[]; moments: Ball[] } {
+  const lines: StoryLine[] = [];
+  const { match, innings, analytics } = detail;
+  if (match.status_text) lines.push({ kicker: "Result", text: `${match.status_text}${match.venue ? ` at ${match.venue}` : ""}.` });
+  for (const inning of innings) {
+    const bat = [...inning.batters].sort((a, b) => b.runs - a.runs || a.balls - b.balls)[0];
+    const bowl = [...inning.bowlers].sort((a, b) => b.wickets - a.wickets || Number(a.runs) - Number(b.runs))[0];
+    const parts = [`${inning.team} made ${inning.runs}/${inning.wickets} in ${inning.overs} overs`];
+    if (bat) parts.push(`led by ${bat.name} (${bat.runs}${bat.not_out ? "*" : ""} off ${bat.balls})`);
+    let text = parts.join(", ");
+    const fielding = innings.find((other) => other.team !== inning.team)?.team;
+    if (bowl && bowl.wickets > 0) text += `; ${bowl.name} took ${bowl.wickets}/${bowl.runs}${fielding ? ` for ${fielding}` : ""}`;
+    lines.push({ kicker: inning.number === 1 ? "First innings" : "Chase", text: `${text}.` });
+  }
+  const top = analytics.impact[0];
+  const team = top ? top.team || playerTeams(innings).get(top.player) : "";
+  if (top) lines.push({ kicker: "Biggest impact", text: `${top.player}${team ? ` (${team}, ${roleLabel(top.role)})` : ""} was worth ${top.impact > 0 ? "+" : ""}${top.impact.toFixed(1)} runs above match par.` });
+  const swing = [...analytics.turning_points].sort((a, b) => Math.abs(b.swing) - Math.abs(a.swing))[0];
+  if (swing) lines.push({ kicker: "Turning point", text: `Over ${swing.over} swung the game ${swing.swing > 0 ? "towards" : "away from"} ${swing.team}: ${swing.runs} runs, ${swing.wickets} wicket${swing.wickets === 1 ? "" : "s"}.` });
+  const moments = detail.balls.filter((ball) => ball.wicket || (ball.boundary && ball.runs >= 6)).slice(0, 6);
+  const fallback = moments.length ? moments : detail.balls.filter((ball) => ball.boundary).slice(0, 4);
+  return { lines, moments: fallback };
+}
+
+function MatchStory({ detail, onTab }: { detail: MatchDetail; onTab: (tab: MatchTab) => void }) {
+  const { lines, moments } = useMemo(() => buildMatchStory(detail), [detail]);
+  if (!lines.length) return null;
+  return <article className="detail-card story-card"><div className="card-title"><div><p className="section-kicker">MATCH STORY</p><h3>How it was won</h3></div><span className="story-badge" title="Built only from scorecard, analytics and commentary data">Grounded recap</span></div>
+    <ol className="story-lines">{lines.map((line) => <li key={line.kicker}><span>{line.kicker}</span><p>{line.text}</p></li>)}</ol>
+    {moments.length > 0 && <div className="key-moments"><p className="section-kicker">KEY MOMENTS FROM COMMENTARY</p>{moments.map((ball) => <div className={`moment${ball.wicket ? " wicket" : " boundary"}`} key={ball.id}><b>{ball.label}</b><em>{ball.event}</em><span><strong>{ball.title}</strong>{ball.text}</span></div>)}<button className="wide-action" onClick={() => onTab("balls")}>Full delivery timeline →</button></div>}
+    {detail.ball_coverage.level !== "full" && <p className="story-caveat">Commentary coverage: {detail.ball_coverage.label.toLowerCase()}. Key moments may be incomplete.</p>}
+  </article>;
+}
+
 function Overview({ detail, onTab }: { detail: MatchDetail; onTab: (tab: MatchTab) => void }) {
   return <div className="overview-grid">
+    <MatchStory detail={detail} onTab={onTab} />
     <article className="detail-card"><div className="card-title"><div><p className="section-kicker">INNINGS</p><h3>Match at a glance</h3></div><button onClick={() => onTab("scorecard")}>Full scorecard →</button></div><div className="innings-summary">{detail.innings.map((inning) => <div key={inning.number}><span>{inning.number}</span><div><strong>{inning.team}</strong><small>{inning.overs} overs · {inning.extras} extras</small></div><b>{inning.runs}/{inning.wickets}</b></div>)}</div></article>
     <article className="detail-card"><div className="card-title"><div><p className="section-kicker">COVERAGE</p><h3>{detail.ball_coverage.label}</h3></div><span className={`coverage ${detail.ball_coverage.level}`}>{detail.ball_coverage.level}</span></div><p className="card-copy">{detail.ball_coverage.note}</p><button className="wide-action" onClick={() => onTab("balls")}>Explore available deliveries →</button></article>
-    <article className="detail-card"><div className="card-title"><div><p className="section-kicker">MATCH NOTES</p><h3>Known facts</h3></div></div><dl className="facts"><div><dt>Toss</dt><dd>{typeof detail.toss === "string" ? detail.toss : JSON.stringify(detail.toss)}</dd></div><div><dt>Award</dt><dd>{detail.player_awards.join(", ") || "Unavailable"}</dd></div><div><dt>Feeds</dt><dd>{detail.sources.filter((source) => source.available).length}/{detail.sources.length} available</dd></div></dl></article>
+    <article className="detail-card"><div className="card-title"><div><p className="section-kicker">MATCH NOTES</p><h3>Known facts</h3></div></div><dl className="facts"><div><dt>Toss</dt><dd>{formatToss(detail.toss)}</dd></div><div><dt>Award</dt><dd>{detail.player_awards.join(", ") || "Unavailable"}</dd></div><div><dt>Feeds</dt><dd>{detail.sources.filter((source) => source.available).length}/{detail.sources.length} available</dd></div></dl></article>
     <article className="detail-card source-card"><div className="card-title"><div><p className="section-kicker">PROVENANCE</p><h3>Where this came from</h3></div></div>{detail.sources.map((source) => <div className="source-row" key={source.name}><i className={source.available ? "on" : ""} /><span><strong>{source.name}</strong><small>{source.provider}</small></span><b>{source.available ? "READY" : "FALLBACK"}</b></div>)}</article>
   </div>;
 }
@@ -409,14 +593,16 @@ function BallByBall({ detail, balls, filter, onFilter }: { detail: MatchDetail; 
 }
 
 function Analytics({ detail }: { detail: MatchDetail }) {
-  return <div className="analytics-layout"><article className="detail-card"><div className="card-title"><div><p className="section-kicker">PLAYER IMPACT</p><h3>Runs above match par</h3></div></div><div className="impact-list">{detail.analytics.impact.slice(0, 8).map((player, index) => <div key={`${player.player}-${player.role}`}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{player.player}</strong><small>{player.team} · {player.role}</small></div><b>{player.impact > 0 ? "+" : ""}{player.impact.toFixed(1)}</b></div>)}</div></article>
+  const teams = playerTeams(detail.innings);
+  const peak = Math.max(1, ...detail.analytics.momentum.flatMap((series) => series.values.map(Math.abs)));
+  return <div className="analytics-layout"><article className="detail-card"><div className="card-title"><div><p className="section-kicker">PLAYER IMPACT</p><h3>Runs above match par</h3></div></div><div className="impact-list">{detail.analytics.impact.slice(0, 8).map((player, index) => <div key={`${player.player}-${player.role}`}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{player.player}</strong><small>{[player.team || teams.get(player.player), roleLabel(player.role)].filter(Boolean).join(" · ")}</small></div><b>{player.impact > 0 ? "+" : ""}{player.impact.toFixed(1)}</b></div>)}</div></article>
     <article className="detail-card"><div className="card-title"><div><p className="section-kicker">TURNING POINTS</p><h3>Where the match moved</h3></div></div><div className="turning-list">{detail.analytics.turning_points.map((point, index) => <div key={`${point.team}-${point.over}-${index}`}><span>{point.over}</span><div><strong>{point.team}</strong><small>{point.runs} runs · {point.wickets} wickets</small></div><b>{point.swing > 0 ? "+" : ""}{point.swing.toFixed(1)}</b></div>)}</div></article>
-    <article className="detail-card momentum-card"><div className="card-title"><div><p className="section-kicker">MOMENTUM</p><h3>Innings pressure curve</h3></div></div>{detail.analytics.momentum.map((series) => <div className="momentum-row" key={series.team}><strong>{series.team}</strong><div>{series.values.map((value, index) => <i key={index} style={{ height: `${Math.max(4, Math.min(100, Math.abs(value)))}%` }} title={`${value}`} />)}</div></div>)}</article>
+    <article className="detail-card momentum-card"><div className="card-title"><div><p className="section-kicker">MOMENTUM</p><h3>Innings pressure curve</h3></div></div>{detail.analytics.momentum.map((series) => <div className="momentum-row" key={series.team}><strong>{series.team}</strong><div>{series.values.map((value, index) => <i key={index} className={value < 0 ? "down" : "up"} style={{ height: `${Math.max(3, (Math.abs(value) / peak) * 50)}%` }} title={`Over ${index + 1}: ${value > 0 ? "+" : ""}${value}`} />)}</div></div>)}<p className="card-copy">Smoothed per-over runs against the innings average, with each wicket costing 8 runs. Above the line, the batting side was on top; below it, the bowlers were. Scaled to the largest swing in this match.</p></article>
   </div>;
 }
 
 function DocsDrawer({ open, docs, onClose }: { open: boolean; docs: DocsCatalog | null; onClose: () => void }) {
-  return <aside className={`docs-drawer${open ? " open" : ""}`} aria-label="Cricbot documentation"><header><div><p className="section-kicker">LIVING DOCUMENTATION</p><strong>{docs?.title ?? "Cricbot platform contract"}</strong><small>API patterns, ownership, state, and provenance</small></div><button onClick={onClose}>×</button></header><div className="docs-scroll">
+  return <aside className={`docs-drawer${open ? " open" : ""}`} aria-label="Cricbot documentation"><header><div><p className="section-kicker">LIVING DOCUMENTATION</p><strong>{docs?.title ?? "Cricbot platform contract"}</strong><small>API patterns, ownership, state, and provenance</small></div><button onClick={onClose} aria-label="Close documentation">×</button></header><div className="docs-scroll">
     <section><h3>Architecture rules</h3>{(docs?.principles ?? ["Loading the local documentation catalog…"]).map((item) => <p className="doc-principle" key={item}>{item}</p>)}</section>
     <section><h3>Data sources</h3>{docs?.sources.map((source) => <article className="doc-source" key={source.name}><strong>{source.name}</strong><p>{source.use}</p><small>{source.mode}</small></article>)}</section>
     <section><h3>API contracts</h3>{docs?.apis.map((api) => <article className="api-contract" key={api.path}><div><b>{api.method}</b><code>{api.path}</code></div><p>{api.use}</p>{api.request && <small>Request · {api.request}</small>}<small>Response · {api.response}</small></article>)}</section>
@@ -430,7 +616,7 @@ function DocsDrawer({ open, docs, onClose }: { open: boolean; docs: DocsCatalog 
 function TraceDrawer({ open, graph, trace, loading, onClose }: { open: boolean; graph: AgentGraph; trace: TraceEvent[]; loading: boolean; onClose: () => void }) {
   const current = trace.at(-1);
   const visited = new Set(trace.map((event) => event.node));
-  return <aside className={`trace-panel${open ? " open" : ""}`} aria-label="Live LangGraph trace"><header className="trace-header"><div><p className="section-kicker">LIVE LANGGRAPH</p><strong>Agent graph</strong><small>{graph.nodes.length} nodes · {graph.version}</small></div><button onClick={onClose}>×</button></header><div className="trace-scroll">
+  return <aside className={`trace-panel${open ? " open" : ""}`} aria-label="Live LangGraph trace"><header className="trace-header"><div><p className="section-kicker">LIVE LANGGRAPH</p><strong>Agent graph</strong><small>{graph.nodes.length} nodes · {graph.version}</small></div><button onClick={onClose} aria-label="Close agent trace">×</button></header><div className="trace-scroll">
     <section className="graph-card"><div className="graph-card-head"><span>Workflow</span><em>{loading ? "RUNNING" : "READY"}</em></div><div className="graph-flow">{graph.nodes.map((node, index) => <div key={node.id}><div className={`graph-node${current?.node === node.id && loading ? " active" : visited.has(node.id) ? " complete" : ""}`}><span>{visited.has(node.id) ? "✓" : index + 1}</span><div><strong>{node.label}</strong><small>{node.description}</small></div></div>{index < graph.nodes.length - 1 && <i className="flow-arrow">↓</i>}</div>)}</div></section>
     <section className="state-card"><div className="graph-card-head"><span>Current state</span><em>{current ? `#${current.sequence}` : "IDLE"}</em></div>{current ? <div className="state-grid"><div><span>Phase</span><strong>{current.label}</strong></div><div><span>Route</span><strong>{current.snapshot.route}</strong></div><div><span>Tools</span><strong>{current.snapshot.tools.join(", ") || "pending"}</strong></div><div><span>Results</span><strong>{current.snapshot.result_count}</strong></div><div><span>Actions</span><strong>{current.snapshot.action_count}</strong></div><div><span>Validation</span><strong>{current.snapshot.validation}</strong></div></div> : <p className="trace-empty">Send Pandit a message to watch every state patch.</p>}</section>
     <section className="timeline-card"><div className="graph-card-head"><span>State transitions</span><em>{trace.length} EVENTS</em></div><div className="trace-timeline">{trace.length ? trace.map((event) => <details className="trace-event" key={`${event.sequence}-${event.node}`} open={event.sequence === current?.sequence}><summary><span>{String(event.sequence).padStart(2, "0")}</span><div><strong>{event.label}</strong><small>{event.kind}</small></div><i>⌄</i></summary><p>{event.summary}</p><pre>{JSON.stringify(event.patch, null, 2)}</pre></details>) : <p className="trace-empty">No transitions yet. The graph is loaded and ready.</p>}</div></section>

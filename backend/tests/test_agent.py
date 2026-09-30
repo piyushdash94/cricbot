@@ -69,6 +69,16 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(entities["teams"], ["RCB"])
         self.assertEqual(entities["years"], [2025])
 
+    def test_entity_resolver_does_not_carry_into_named_fixture(self):
+        entities = resolve_entities(
+            "Show me the 2024 final",
+            history=[{"role": "user", "content": "How did Krunal Pandya bowl for RCB?"}],
+            current_year=2026,
+        )
+        self.assertEqual(entities["teams"], [])
+        self.assertEqual(entities["players"], [])
+        self.assertEqual(entities["retrieval_query"], "2024 final")
+
     @patch("backend.agent.tools.search_ipl_archive")
     def test_list_intent_returns_every_match_and_filters_ui(self, archive):
         archive.return_value = [
@@ -115,6 +125,19 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(entities["patch"]["entities"]["teams"], ["RCB", "PBKS"])
         self.assertIn("search_matches", route["patch"]["tool_names"])
         self.assertEqual(result["validation"], "grounded")
+
+    def test_offline_gemma_falls_back_to_deterministic_reply(self):
+        def refuse(request: httpx.Request):
+            raise httpx.ConnectError("Connection refused", request=request)
+
+        client = GemmaCompletionClient(client=httpx.Client(
+            base_url="http://127.0.0.1:8080", transport=httpx.MockTransport(refuse),
+        ))
+        with self.assertRaises(RuntimeError):
+            client.complete("Question: Anything?\nAnswer:")
+        result = CricbotAgent(gemma=client).answer("switch to light mode")
+        self.assertTrue(result["reply"])
+        self.assertFalse(result["model_used"])
 
 
 if __name__ == "__main__":

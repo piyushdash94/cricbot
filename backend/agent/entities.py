@@ -45,6 +45,7 @@ MATCH_TERMS = (
     "final", "qualifier", "eliminator", "playoff", "semi-final", "semifinal",
     "opener", "opening match", "league match", "live match",
 )
+UNIQUE_MATCH_TERMS = {"final", "qualifier", "eliminator", "semi-final", "semifinal", "opener", "opening match"}
 
 TOPICS = (
     "analytics", "analysis", "impact", "momentum", "pitch", "conditions",
@@ -139,14 +140,18 @@ def resolve_entities(
     teams, corrections = _team_entities(text)
     players = _exact_entities(text, PLAYER_ALIASES)
 
-    # Carry a previously discussed entity only when the new message omitted it.
-    if not teams:
+    # Carry a previously discussed entity only when the new message omitted it
+    # and does not already name a single fixture ("the 2024 final").
+    terms = [term for term in MATCH_TERMS if _contains_phrase(text, term)]
+    venues = _exact_entities(text, VENUES)
+    self_contained = bool(teams or players or venues) or any(term in UNIQUE_MATCH_TERMS for term in terms)
+    if not self_contained:
         for item in reversed(history or []):
             prior_teams, _ = _team_entities(item.get("content", "").casefold())
             if prior_teams:
                 teams = prior_teams
                 break
-    if not players:
+    if not self_contained:
         for item in reversed(history or []):
             prior_players = _exact_entities(item.get("content", "").casefold(), PLAYER_ALIASES)
             if prior_players:
@@ -155,9 +160,7 @@ def resolve_entities(
 
     years, temporal_reference, temporal_corrections = _temporal_entities(text, year)
     corrections.extend(temporal_corrections)
-    terms = [term for term in MATCH_TERMS if _contains_phrase(text, term)]
     topics = [topic for topic in TOPICS if _contains_phrase(text, topic)]
-    venues = _exact_entities(text, VENUES)
     intent, wants_all = _intent(text, teams, players)
 
     corrected_query = message.strip()

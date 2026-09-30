@@ -339,6 +339,6 @@ def get_match_detail(series_slug: str, match_slug: str) -> dict[str, Any]:
         "sources": [
             {"name": "Match info", "provider": source, "available": bool(info_ok or source.endswith("fallback"))},
             {"name": "Scorecard", "provider": source, "available": True},
-            {"name": "Ball-by-ball", "provider": "dedicated feed" if ball_ok else "commentary fallback", "available": bool(balls)},
+            {"name": "Ball-by-ball", "provider": {"full": "dedicated feed", "commentary": "commentary fallback", "demo": source}.get(coverage, "unavailable"), "available": bool(balls)},
         ],
     }
