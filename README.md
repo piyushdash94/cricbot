@@ -30,6 +30,8 @@ cricbot/
 - A collapsible live trace pane showing graph traversal, conditional branches, intermediate summaries, state patches, and UI actions
 - Archive-first UI with season filters, historical match search, scorecards, available ball-by-ball commentary, provenance, and analytics
 - Natural-language UI actions: filter the archive, open a historical match, switch match tabs, navigate sections, and change theme
+- A grounded match story on every match overview, built only from scorecard, impact analytics, and commentary key moments (no model-generated numbers)
+- Shareable match links with Back/Forward support, a copy-summary action, and keyboard shortcuts (`/` to search, `Esc` to close panels)
 - In-app Docs drawer describing every public contract, source, tool owner, LangGraph state, transition, and fallback level
 - Stable demo data so the UI remains useful without network access
 
