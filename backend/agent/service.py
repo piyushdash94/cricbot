@@ -348,7 +348,7 @@ class CricbotAgent:
     def _grounded_fallback(self, state: PanditState) -> str:
         cards = state.get("cards") or []
         if cards and cards[0]["type"] == "match" and state.get("entities", {}).get("intent") != "list_matches":
-            return deterministic_summary(cards[0])
+            return deterministic_summary(cards[0], state.get("query", ""))
         return self._fallback_reply(state["query"], state.get("results", []), state.get("entities"))
 
     def _finalize(self, state: PanditState) -> PanditState:

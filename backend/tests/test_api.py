@@ -137,6 +137,23 @@ class ApiTests(unittest.TestCase):
         self.assertIn("RCB won by 6 runs", payload["reply"])
         self.assertEqual(payload["cards"][0]["type"], "match")
 
+    def test_offline_momentum_question_leads_with_the_decisive_shift(self):
+        from backend.agent.match_facts import deterministic_summary
+        card = {
+            "match": {"title": "RCB vs PBKS", "status_text": "RCB won by 6 runs", "season": 2025, "label": "Final"},
+            "innings": [], "player_of_match": [],
+            "momentum_shifts": [
+                {"type": "wicket_cluster", "innings_team": "PBKS", "from": "16.1", "to": "17.4", "headline": "3 wickets for 9 runs in 10 balls",
+                 "score_before": "150/4", "score_after": "159/7", "favours": "RCB", "magnitude": 30.0, "decisive": True},
+                {"type": "scoring_burst", "innings_team": "PBKS", "from": "5.1", "to": "6.6", "headline": "34 runs in 2 overs with 6 boundaries",
+                 "score_before": "40/1", "score_after": "74/1", "favours": "PBKS", "magnitude": 14.0},
+            ],
+        }
+        reply = deterministic_summary(card, "Where did this match turn?")
+        self.assertIn("decisive shift was a wicket cluster in the PBKS innings, overs 16.1–17.4", reply)
+        self.assertIn("scoring burst in overs 5.1–6.6", reply)
+        self.assertNotIn("decisive", deterministic_summary(card, "Give me the scorecard"))
+
     @patch.object(agent.llm, "chat", return_value=("RCB won by 6 runs.", "groq", "m"))
     def test_streaming_agent_emits_trace_before_result(self, _chat):
         response = self.client.post("/api/agent/chat/stream", json={

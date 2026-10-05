@@ -172,14 +172,35 @@ def match_list_card(results: list[dict[str, Any]], title: str) -> dict[str, Any]
     }
 
 
-def deterministic_summary(card: dict[str, Any]) -> str:
-    """Plain recap used when no LLM is reachable or its answer fails grounding."""
+MOMENTUM_WORDS = re.compile(r"\b(turn\w*|momentum|shift\w*|swing\w*|collapse\w*|pressure|decisive|won|lost|where .* (won|lost))\b", re.I)
+
+
+def _shift_sentence(shift: dict[str, Any]) -> str:
+    kind = shift["type"].replace("_", " ")
+    return (f"The decisive shift was a {kind} in the {shift['innings_team']} innings, overs {shift['from']}–{shift['to']}: "
+            f"{shift['headline']} ({shift['score_before']} → {shift['score_after']}), which favoured {shift['favours']}.")
+
+
+def deterministic_summary(card: dict[str, Any], question: str = "") -> str:
+    """Plain recap used when no LLM is reachable or its answer fails grounding.
+
+    Momentum-style questions lead with the detected decisive shift, so the
+    answer addresses what was asked even without a model.
+    """
     match = card["match"]
+    decisive = next((shift for shift in card.get("momentum_shifts", []) if shift.get("decisive")), None)
+    if decisive and MOMENTUM_WORDS.search(question or ""):
+        others = [shift for shift in card["momentum_shifts"] if not shift.get("decisive") and shift["favours"] != decisive["favours"]]
+        reply = f"{match['title']}: {match.get('status_text') or 'result unavailable'}. {_shift_sentence(decisive)}"
+        if others:
+            counter = max(others, key=lambda shift: shift["magnitude"])
+            reply += f" The other side's best spell was a {counter['type'].replace('_', ' ')} in overs {counter['from']}–{counter['to']} ({counter['headline']})."
+        return reply
     parts = [f"{match['title']}, {match.get('label') or 'IPL'} {match['season']}: {match.get('status_text') or 'result unavailable'}."]
     for inning in card["innings"]:
         bat = inning["top_batters"][0] if inning["top_batters"] else None
         bowl = inning["top_bowlers"][0] if inning["top_bowlers"] else None
-        text = f"{inning['team']} {inning['score']} ({inning['overs']} ov)"
+        text = f"{inning['team']} {inning['score']} ({float(inning['overs']):g} ov)"
         if bat:
             text += f", top score {bat['name']} {bat['runs']}{'*' if bat['not_out'] else ''} off {bat['balls']}"
         if bowl and bowl["wickets"]:

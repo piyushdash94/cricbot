@@ -101,6 +101,17 @@ cd /Users/saketm10/Projects/foundation-ai-platform/mac-serving
 
 Confirm readiness at `http://127.0.0.1:8080/readyz`. Never expose port `8080` directly to the internet.
 
+## Demo dashboard (Streamlit)
+
+A single-process demo that imports the backend directly (no FastAPI or Node):
+
+```bash
+pip install -r demo/requirements.txt
+streamlit run demo/streamlit_app.py        # http://localhost:8501
+```
+
+It has season and match pickers, Pandit chat, overview with provenance, scorecard, a filterable ball-by-ball table, and a Momentum tab with a worm chart (detected shifts highlighted on the innings where they happened) and runs-per-over. It reads the same `backend/.env` keys and Cricsheet data as the main app; without an LLM, Pandit answers with grounded recaps.
+
 ## Share a temporary preview with ngrok
 
 Start the backend and frontend as described above, then run:
