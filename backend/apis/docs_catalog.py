@@ -9,13 +9,14 @@ def docs_catalog():
         "version": "1.2.0",
         "principles": [
             "The browser only consumes Cricbot's canonical JSON; provider-specific shapes stay in backend/src.",
-            "Historical coverage is honest: full ball feed → commentary → over summaries → unavailable.",
+            "Historical coverage is honest: Cricsheet deliveries → ESPN play-by-play → Cricinfo commentary → over summaries → unavailable.",
             "Pandit retrieves deterministic facts first and uses local Gemma only to phrase grounded answers.",
             "Team typos and relative dates are resolved before retrieval; the resolved entities remain visible in the graph trace.",
         ],
         "sources": [
             {"name": "cricdata / ESPNcricinfo", "use": "IPL schedules, results, match info, scorecards, overs, partnerships and commentary", "mode": "live upstream, cached in process"},
-            {"name": "Dedicated ball feed", "use": "Ball-level events when the upstream endpoint is available", "mode": "best effort"},
+            {"name": "Cricsheet", "use": "Every delivery of every IPL match (structured, no commentary prose); ODC-BY licensed", "mode": "offline after `python -m backend.src.cricsheet sync`"},
+            {"name": "ESPN play-by-play", "use": "Full deliveries with commentary text via cricdata.match_ball_by_ball", "mode": "best effort, paginated"},
             {"name": "Local demo payload", "use": "Stable scorecard and sample delivery timeline when the provider is unavailable", "mode": "automatic fallback, explicitly labelled"},
             {"name": "Gemma 4 E4B", "use": "Friendly natural-language synthesis after deterministic retrieval", "mode": "local only at 127.0.0.1:8080/v1/completions"},
         ],
@@ -49,7 +50,8 @@ def docs_catalog():
         "nodes": GRAPH_NODES,
         "transitions": GRAPH_EDGES,
         "coverage": [
-            {"level": "full", "meaning": "Dedicated ball endpoint returned normalized deliveries"},
+            {"level": "cricsheet", "meaning": "Every delivery from the local Cricsheet archive; descriptions generated from structured data"},
+            {"level": "full", "meaning": "ESPN play-by-play returned every delivery with commentary text"},
             {"level": "commentary", "meaning": "Deliveries reconstructed from historical commentary; may be partial"},
             {"level": "overs-only", "meaning": "Only over aggregates are available"},
             {"level": "demo", "meaning": "Clearly labelled local sample while the provider is offline"},

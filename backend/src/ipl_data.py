@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from backend.apis.demo_data import demo_scorecard
+from backend.src import cricsheet
 from backend.src.impact_lab import impact_leaderboard, match_par, momentum_series, pitch_profile, turning_points
 from backend.src.scorecard_helpers import extract_commentary_text, innings_team_name
 
@@ -19,6 +20,19 @@ IPL_SERIES = {
     2025: {"name": "IPL 2025", "slug": "ipl-2025-1449924"},
     2024: {"name": "Indian Premier League 2024", "slug": "indian-premier-league-2024-1410320"},
     2023: {"name": "Indian Premier League 2023", "slug": "indian-premier-league-2023-1345038"},
+}
+
+COVERAGE_LABELS = {
+    "cricsheet": "Every delivery (Cricsheet)", "full": "Full ball feed", "commentary": "Available commentary",
+    "demo": "Demo fallback", "overs-only": "Over summaries only", "unavailable": "Unavailable",
+}
+COVERAGE_NOTES = {
+    "cricsheet": "Every delivery from Cricsheet's structured record. Descriptions are generated from that record; there is no broadcast commentary text.",
+    "full": "Every delivery from ESPN's play-by-play feed, with commentary text.",
+    "commentary": "Reconstructed from Cricinfo commentary pages, which can be partial for older matches.",
+    "demo": "Local sample deliveries while live providers are unavailable.",
+    "overs-only": "Only over aggregates are available for this match.",
+    "unavailable": "No delivery-level data is available; the scorecard remains usable.",
 }
 
 DEMO_MATCH_SLUG = "royal-challengers-bengaluru-vs-punjab-kings-final-1473511"
@@ -241,6 +255,71 @@ def _normalize_commentary(payload: Any) -> list[dict[str, Any]]:
     return sorted(balls, key=order)
 
 
+def _normalize_espn_balls(payload: Any) -> list[dict[str, Any]]:
+    """Normalize ESPN play-by-play (``list[list[BallItem]]``) to the ball contract."""
+    if not isinstance(payload, list):
+        return []
+    balls = []
+    for group_index, group in enumerate(payload, start=1):
+        for index, item in enumerate(group if isinstance(group, list) else []):
+            if not isinstance(item, dict):
+                continue
+            over = item.get("over") or {}
+            actual = _first(over.get("actual"), over.get("overs"))
+            if actual is not None:
+                label = f"{float(actual):.1f}"
+            elif over.get("number") is not None:
+                # ESPN numbers overs from 1; labels use completed overs.
+                label = f"{int(over['number']) - 1}.{over.get('ball', 0)}"
+            else:
+                label = "—"
+            play = str((item.get("playType") or {}).get("description", "")).casefold()
+            runs = int(_first(item.get("scoreValue"), over.get("runs"), default=0) or 0)
+            wicket = bool((item.get("dismissal") or {}).get("dismissal")) or play == "out"
+            six, four = play == "six", play == "four"
+            if wicket:
+                event = "W"
+            elif "wide" in play:
+                event = f"{runs}wd"
+            elif "no ball" in play:
+                event = f"{runs}nb"
+            else:
+                event = str(runs)
+            bowler = ((item.get("bowler") or {}).get("athlete") or {}).get("displayName", "")
+            batter = ((item.get("batsman") or {}).get("athlete") or {}).get("displayName", "")
+            innings = item.get("innings") or {}
+            balls.append({
+                "id": str(_first(item.get("id"), default=f"espn-{group_index}-{index}")),
+                "inning": int(_first(innings.get("number"), item.get("period"), default=group_index)),
+                "over": int(label.split(".")[0]) if label != "—" else 0,
+                "ball": over.get("ball"),
+                "label": label, "event": event, "runs": runs,
+                "batter_runs": (item.get("batsman") or {}).get("runs", runs if not wicket else 0),
+                "wicket": wicket, "boundary": four or six,
+                "title": f"{bowler} to {batter}" if bowler and batter else item.get("shortText", ""),
+                "text": " ".join(part for part in (item.get("preText"), item.get("text"), item.get("postText")) if part).strip(),
+                "score": "", "win_probability": None,
+                "batter": batter, "bowler": bowler,
+            })
+    def order(item: dict[str, Any]) -> tuple[int, float, str]:
+        try:
+            return item["inning"], float(item["label"]), item["id"]
+        except (TypeError, ValueError):
+            return item["inning"], 0.0, item["id"]
+    return sorted(balls, key=order)
+
+
+def _cricsheet_balls(match: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    path = cricsheet.find_match(match.get("start_time") or match.get("date", ""), [team.get("name", "") for team in match.get("teams", [])])
+    if not path:
+        return [], ""
+    try:
+        loaded = cricsheet.load_deliveries(path)
+    except (OSError, ValueError):
+        return [], ""
+    return loaded["balls"], loaded["file"]
+
+
 def _demo_balls() -> list[dict[str, Any]]:
     rows = [
         (2, "18.4", "4", 4, "Hazlewood to Iyer", "Driven through cover for four."),
@@ -290,8 +369,6 @@ def get_match_detail(series_slug: str, match_slug: str) -> dict[str, Any]:
         client = None
     info, info_ok = _safe_call(client, "match_info", series_slug, match_slug)
     scorecard, score_ok = _safe_call(client, "match_scorecard", series_slug, match_slug)
-    commentary, commentary_ok = _safe_call(client, "match_commentary", series_slug, match_slug)
-    ball_payload, ball_ok = _safe_call(client, "match_ball_by_ball", series_slug, match_slug)
     overs, overs_ok = _safe_call(client, "match_overs", series_slug, match_slug)
     partnerships, partnerships_ok = _safe_call(client, "match_partnerships", series_slug, match_slug)
     fall_of_wickets, fow_ok = _safe_call(client, "match_fall_of_wickets", series_slug, match_slug)
@@ -306,16 +383,24 @@ def get_match_detail(series_slug: str, match_slug: str) -> dict[str, Any]:
         match = _match_from_detail(info if isinstance(info, dict) else {}, scorecard, series_slug, match_slug)
         source = "cricdata / ESPNcricinfo"
 
-    balls = _normalize_commentary(ball_payload) if ball_ok else []
-    coverage = "full" if balls else ""
+    # Ball ladder, cheapest and most complete first. Later sources are only
+    # requested when earlier ones returned nothing.
+    balls, cricsheet_file = _cricsheet_balls(match)
+    coverage, ball_provider = ("cricsheet", f"Cricsheet ({cricsheet_file})") if balls else ("", "")
     if not balls:
+        ball_payload, _ = _safe_call(client, "match_ball_by_ball", series_slug, match_slug)
+        balls = _normalize_espn_balls(ball_payload)
+        coverage, ball_provider = ("full", "ESPN play-by-play") if balls else ("", "")
+    if not balls:
+        commentary, _ = _safe_call(client, "match_commentary", series_slug, match_slug)
         balls = _normalize_commentary(commentary)
-        coverage = "commentary" if balls else ""
+        coverage, ball_provider = ("commentary", "Cricinfo commentary") if balls else ("", "")
     if not balls and source == "local demo fallback":
         balls = _demo_balls()
-        coverage = "demo"
+        coverage, ball_provider = "demo", source
     if not coverage:
         coverage = "overs-only" if overs_ok and overs else "unavailable"
+        ball_provider = "unavailable"
 
     support = scorecard.get("content", {}).get("supportInfo", {}) or {}
     awards = [
@@ -327,8 +412,8 @@ def get_match_detail(series_slug: str, match_slug: str) -> dict[str, Any]:
         "balls": balls,
         "ball_coverage": {
             "level": coverage,
-            "label": {"full": "Full ball feed", "commentary": "Available commentary", "demo": "Demo fallback", "overs-only": "Over summaries only", "unavailable": "Unavailable"}[coverage],
-            "note": "Ball data falls back from the dedicated feed to commentary, then over summaries; coverage can be partial for historical matches.",
+            "label": COVERAGE_LABELS[coverage],
+            "note": COVERAGE_NOTES[coverage],
         },
         "overs": overs if overs_ok else [],
         "partnerships": partnerships if partnerships_ok else [],
@@ -339,6 +424,6 @@ def get_match_detail(series_slug: str, match_slug: str) -> dict[str, Any]:
         "sources": [
             {"name": "Match info", "provider": source, "available": bool(info_ok or source.endswith("fallback"))},
             {"name": "Scorecard", "provider": source, "available": True},
-            {"name": "Ball-by-ball", "provider": {"full": "dedicated feed", "commentary": "commentary fallback", "demo": source}.get(coverage, "unavailable"), "available": bool(balls)},
+            {"name": "Ball-by-ball", "provider": ball_provider, "available": bool(balls)},
         ],
     }

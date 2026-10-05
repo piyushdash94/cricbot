@@ -94,7 +94,8 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(any(tool["owner"] == "extract_entities" for tool in payload["tools"]))
         self.assertTrue(any(tool["owner"] == "retrieve_facts" for tool in payload["tools"]))
         self.assertTrue(any(edge.get("condition") for edge in payload["transitions"]))
-        self.assertEqual(payload["coverage"][0]["level"], "full")
+        levels = [item["level"] for item in payload["coverage"]]
+        self.assertEqual(levels[:2], ["cricsheet", "full"])
 
     @patch.object(agent.gemma, "complete", return_value="RCB's biggest swing came late, and I opened the momentum view.")
     def test_agent_returns_grounded_actions(self, complete):

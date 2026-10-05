@@ -52,6 +52,21 @@ The API is available at `http://127.0.0.1:8000`, with interactive documentation 
 
 Pandit expects the local Gemma server at `http://127.0.0.1:8080` using the OpenAI-compatible `/v1/completions` contract. Its defaults are in `backend/.env.example`; override `GEMMA_API_BASE`, `GEMMA_MODEL`, or `MAC_SERVING_API_KEY` in your shell when needed. The dashboard and deterministic tools continue to work when Gemma is offline.
 
+### Ball-by-ball data (recommended)
+
+Download Cricsheet's IPL archive once so every historical match has complete deliveries offline:
+
+```bash
+python -m backend.src.cricsheet sync
+```
+
+Files land in `backend/data/cricsheet/ipl` (git-ignored; override with `CRICSHEET_DIR`). Re-run after each season to pick up new matches. Match detail then resolves deliveries in this order:
+
+1. **Cricsheet**: every delivery, structured; descriptions are generated from the record (no broadcast prose). Licensed under ODC-BY; credit Cricsheet when publishing.
+2. **ESPN play-by-play** via `cricdata.match_ball_by_ball`: every delivery with commentary text; needs network and pages 25 balls per request.
+3. **Cricinfo commentary pages**: partial for older matches.
+4. Over summaries, then demo data or "unavailable", always labelled in the UI.
+
 ### Frontend
 
 ```bash
@@ -144,6 +159,7 @@ print(build_compact_scorecard(
 | `backend/src/scorecard_renderer.py` | Main compact-scorecard renderer |
 | `backend/src/cricbot_views.py` | Match, standings, player, preview, and fetch helpers |
 | `backend/src/ipl_data.py` | IPL archive access, provider normalization, and ball-data fallback ladder |
+| `backend/src/cricsheet.py` | Cricsheet sync, match index, and delivery normalization |
 | `backend/src/impact_lab.py` | Experimental momentum, impact, and pitch analytics |
 | `backend/agent/tools.py` | LangChain search tools and deterministic query routing |
 | `backend/agent/entities.py` | Team/player/year/venue extraction, typo correction, temporal resolution, and conversational carry-over |
@@ -158,6 +174,7 @@ print(build_compact_scorecard(
 python backend/tests/test_scorecard.py
 python backend/tests/test_api.py
 python backend/tests/test_agent.py
+python backend/tests/test_ball_sources.py
 
 cd frontend/ui
 npm test

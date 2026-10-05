@@ -11,7 +11,8 @@ type ArchiveMatch = {
 type Batter = { name: string; dismissal: string | Record<string, string>; runs: number; balls: number; fours: number; sixes: number; strike_rate: string | number; not_out: boolean };
 type Bowler = { name: string; overs: string | number; maidens: number; runs: string | number; wickets: number; economy: string | number; dots: number };
 type Innings = { number: number; team: string; runs: number; wickets: number; overs: number; extras: number; batters: Batter[]; bowlers: Bowler[] };
-type Ball = { id: string; inning: number; label: string; event: string; runs: number; wicket: boolean; boundary: boolean; title: string; text: string; score: string; win_probability: number | null };
+type Ball = { id: string; inning: number; over?: number; label: string; event: string; runs: number; wicket: boolean; boundary: boolean; title: string; text: string; score: string; win_probability: number | null; batter?: string; bowler?: string; team?: string };
+type BallKind = "all" | "wickets" | "boundaries";
 type MatchDetail = {
   match: ArchiveMatch; innings: Innings[]; balls: Ball[];
   ball_coverage: { level: string; label: string; note: string };
@@ -514,6 +515,13 @@ export default function Home() {
 
 type StoryLine = { kicker: string; text: string };
 
+// Pick up to `count` items spread across the whole list, keeping match order,
+// so key moments cover both innings rather than the first few overs.
+function spread<T>(items: T[], count: number) {
+  if (items.length <= count) return items;
+  return Array.from({ length: count }, (_, index) => items[Math.round((index * (items.length - 1)) / (count - 1))]);
+}
+
 // Impact rows carry no team, so recover it from the scorecard: batters play
 // for the innings team, bowlers for the other side.
 function playerTeams(innings: Innings[]) {
@@ -552,9 +560,9 @@ function buildMatchStory(detail: MatchDetail): { lines: StoryLine[]; moments: Ba
   if (top) lines.push({ kicker: "Biggest impact", text: `${top.player}${team ? ` (${team}, ${roleLabel(top.role)})` : ""} was worth ${top.impact > 0 ? "+" : ""}${top.impact.toFixed(1)} runs above match par.` });
   const swing = [...analytics.turning_points].sort((a, b) => Math.abs(b.swing) - Math.abs(a.swing))[0];
   if (swing) lines.push({ kicker: "Turning point", text: `Over ${swing.over} swung the game ${swing.swing > 0 ? "towards" : "away from"} ${swing.team}: ${swing.runs} runs, ${swing.wickets} wicket${swing.wickets === 1 ? "" : "s"}.` });
-  const moments = detail.balls.filter((ball) => ball.wicket || (ball.boundary && ball.runs >= 6)).slice(0, 6);
-  const fallback = moments.length ? moments : detail.balls.filter((ball) => ball.boundary).slice(0, 4);
-  return { lines, moments: fallback };
+  const candidates = detail.balls.filter((ball) => ball.wicket || (ball.boundary && ball.event === "6"));
+  const pool = candidates.length ? candidates : detail.balls.filter((ball) => ball.boundary);
+  return { lines, moments: spread(pool, 6) };
 }
 
 function MatchStory({ detail, onTab }: { detail: MatchDetail; onTab: (tab: MatchTab) => void }) {
@@ -562,7 +570,7 @@ function MatchStory({ detail, onTab }: { detail: MatchDetail; onTab: (tab: Match
   if (!lines.length) return null;
   return <article className="detail-card story-card"><div className="card-title"><div><p className="section-kicker">MATCH STORY</p><h3>How it was won</h3></div><span className="story-badge" title="Built only from scorecard, analytics and commentary data">Grounded recap</span></div>
     <ol className="story-lines">{lines.map((line) => <li key={line.kicker}><span>{line.kicker}</span><p>{line.text}</p></li>)}</ol>
-    {moments.length > 0 && <div className="key-moments"><p className="section-kicker">KEY MOMENTS FROM COMMENTARY</p>{moments.map((ball) => <div className={`moment${ball.wicket ? " wicket" : " boundary"}`} key={ball.id}><b>{ball.label}</b><em>{ball.event}</em><span><strong>{ball.title}</strong>{ball.text}</span></div>)}<button className="wide-action" onClick={() => onTab("balls")}>Full delivery timeline →</button></div>}
+    {moments.length > 0 && <div className="key-moments"><p className="section-kicker">KEY MOMENTS FROM COMMENTARY</p>{moments.map((ball) => <div className={`moment${ball.wicket ? " wicket" : " boundary"}`} key={ball.id}><b>{inningsTag(detail, ball)} {ball.label}</b><em>{ball.event}</em><span><strong>{ball.title}</strong>{ball.text}</span></div>)}<button className="wide-action" onClick={() => onTab("balls")}>Full delivery timeline →</button></div>}
     {detail.ball_coverage.level !== "full" && <p className="story-caveat">Commentary coverage: {detail.ball_coverage.label.toLowerCase()}. Key moments may be incomplete.</p>}
   </article>;
 }
@@ -584,11 +592,49 @@ function Scorecard({ innings }: { innings: Innings[] }) {
   </article>)}</div>;
 }
 
+function teamAbbr(detail: MatchDetail, name?: string) {
+  if (!name) return undefined;
+  return detail.match.teams.find((team) => team.name === name || team.abbr === name)?.abbr ?? name;
+}
+
+function inningsTag(detail: MatchDetail, ball: Ball) {
+  return teamAbbr(detail, ball.team ?? detail.innings.find((inning) => inning.number === ball.inning)?.team) ?? `Inns ${ball.inning}`;
+}
+
+function overNumber(ball: Ball) {
+  return ball.over ?? Number.parseInt(ball.label, 10);
+}
+
+// Group consecutive deliveries into overs so a 240-ball match stays scannable.
+function groupOvers(balls: Ball[]) {
+  const groups: { key: string; inning: number; over: number; balls: Ball[] }[] = [];
+  for (const ball of balls) {
+    const over = overNumber(ball);
+    const last = groups.at(-1);
+    if (last && last.inning === ball.inning && last.over === over) last.balls.push(ball);
+    else groups.push({ key: `${ball.inning}-${over}-${groups.length}`, inning: ball.inning, over, balls: [ball] });
+  }
+  return groups;
+}
+
 function BallByBall({ detail, balls, filter, onFilter }: { detail: MatchDetail; balls: Ball[]; filter: number; onFilter: (value: number) => void }) {
+  const [kind, setKind] = useState<BallKind>("all");
   const innings = Array.from(new Set(detail.balls.map((ball) => ball.inning)));
-  return <div className="balls-layout"><article className="detail-card balls-card"><div className="card-title"><div><p className="section-kicker">DELIVERY TIMELINE</p><h3>Ball by ball</h3></div><span className={`coverage ${detail.ball_coverage.level}`}>{detail.ball_coverage.label}</span></div><div className="innings-filter"><button className={filter === 0 ? "active" : ""} onClick={() => onFilter(0)}>All</button>{innings.map((number) => <button className={filter === number ? "active" : ""} key={number} onClick={() => onFilter(number)}>Innings {number}</button>)}</div>
-    <div className="ball-list">{balls.length ? balls.map((ball) => <div className={`ball-row${ball.wicket ? " wicket" : ball.boundary ? " boundary" : ""}`} key={ball.id}><span>{ball.label}</span><b>{ball.event}</b><div><strong>{ball.title || `Delivery ${ball.label}`}</strong><p>{ball.text || "Commentary text unavailable."}</p></div>{ball.score && <em>{ball.score}</em>}</div>) : <div className="empty-state"><strong>No delivery records in this feed</strong><p>Try Overview or Scorecard; over-level data may still be available.</p></div>}</div></article>
-    <aside className="coverage-note"><p className="section-kicker">READ THIS FEED</p><h3>Coverage, not guesswork.</h3><p>{detail.ball_coverage.note}</p><div>{detail.sources.map((source) => <span key={source.name}><i className={source.available ? "on" : ""} />{source.name}</span>)}</div></aside>
+  const teamFor = (number: number) => teamAbbr(detail, detail.balls.find((ball) => ball.inning === number && ball.team)?.team ?? detail.innings.find((inning) => inning.number === number)?.team);
+  const shown = kind === "all" ? balls : balls.filter((ball) => kind === "wickets" ? ball.wicket : ball.boundary);
+  const overs = groupOvers(shown);
+  const wickets = balls.filter((ball) => ball.wicket).length;
+  const boundaries = balls.filter((ball) => ball.boundary).length;
+  return <div className="balls-layout"><article className="detail-card balls-card"><div className="card-title"><div><p className="section-kicker">DELIVERY TIMELINE</p><h3>Ball by ball</h3></div><span className={`coverage ${detail.ball_coverage.level}`}>{detail.ball_coverage.label}</span></div>
+    <div className="innings-filter"><button className={filter === 0 ? "active" : ""} onClick={() => onFilter(0)}>All innings</button>{innings.map((number) => <button className={filter === number ? "active" : ""} key={number} onClick={() => onFilter(number)}>{teamFor(number) ?? `Innings ${number}`}</button>)}<span className="filter-gap" />{(["all", "wickets", "boundaries"] as BallKind[]).map((value) => <button className={kind === value ? "active" : ""} key={value} onClick={() => setKind(value)}>{value === "all" ? `${balls.length} balls` : value === "wickets" ? `${wickets} wickets` : `${boundaries} boundaries`}</button>)}</div>
+    <div className="ball-list">{overs.length ? overs.map((group) => {
+      const runs = group.balls.reduce((sum, ball) => sum + ball.runs, 0);
+      const end = group.balls.at(-1)?.score;
+      return <section className="over-group" key={group.key}><header><strong>{filter === 0 && innings.length > 1 ? `${teamFor(group.inning) ?? `Inns ${group.inning}`} · ` : ""}Over {group.over + 1}</strong>{kind === "all" && <span>{runs} run{runs === 1 ? "" : "s"}{end ? ` · ${end}` : ""}</span>}</header>
+        {group.balls.map((ball) => <div className={`ball-row${ball.wicket ? " wicket" : ball.boundary ? " boundary" : /wd|nb/.test(ball.event) ? " extra" : ""}`} key={ball.id}><span>{ball.label}</span><b>{ball.event}</b><div><strong>{ball.title || `Delivery ${ball.label}`}</strong><p>{ball.text || "Commentary text unavailable."}</p></div>{ball.score && <em>{ball.score}</em>}</div>)}
+      </section>;
+    }) : <div className="empty-state"><strong>{detail.balls.length ? "No deliveries match this filter" : "No delivery records in this feed"}</strong><p>{detail.balls.length ? "Switch back to all balls or another innings." : "Try Overview or Scorecard; over-level data may still be available."}</p></div>}</div></article>
+    <aside className="coverage-note"><p className="section-kicker">READ THIS FEED</p><h3>Coverage, not guesswork.</h3><p>{detail.ball_coverage.note}</p><div>{detail.sources.map((source) => <span key={source.name} title={source.provider}><i className={source.available ? "on" : ""} />{source.name}<small>{source.provider}</small></span>)}</div></aside>
   </div>;
 }
 
