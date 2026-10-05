@@ -3,7 +3,11 @@
 import json
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from backend.agent.llm import load_env_file
+
+load_env_file()  # backend/.env, before modules read their configuration
+
+from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -35,7 +39,8 @@ from backend.src.impact_lab import (
 )
 from backend.src.scorecard_helpers import innings_team_name, over_series
 from backend.src.scorecard_renderer import build_compact_scorecard
-from backend.src.ipl_data import IPL_SERIES, get_match_detail, list_ipl_matches
+from backend.src import cricsheet
+from backend.src.ipl_data import all_seasons, get_match_detail, list_ipl_matches, series_slug_for
 
 
 app = FastAPI(
@@ -120,11 +125,27 @@ def search(q: str, limit: int = 12):
 
 @app.get("/api/ipl/seasons", tags=["ipl archive"])
 def ipl_seasons():
+    archived = set(cricsheet.seasons())
     return {
         "seasons": [
-            {"year": year, **metadata}
-            for year, metadata in IPL_SERIES.items()
+            {"year": year, "name": f"IPL {year}", "slug": series_slug_for(year), "source": "Cricsheet" if year in archived else "ESPNcricinfo"}
+            for year in all_seasons()
         ]
+    }
+
+
+@app.get("/api/data/status", tags=["ipl archive"])
+def data_status():
+    entries = cricsheet.entries()
+    return {
+        "cricsheet": {
+            "matches": len(entries),
+            "seasons": cricsheet.seasons(),
+            "directory": str(cricsheet.data_dir()),
+            "synced": bool(entries),
+            "sync_command": "python -m backend.src.cricsheet sync",
+        },
+        "canonical_source": "Cricsheet" if entries else "ESPNcricinfo (Cricsheet not synced)",
     }
 
 
