@@ -79,6 +79,20 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(entities["players"], [])
         self.assertEqual(entities["retrieval_query"], "2024 final")
 
+    def test_common_words_are_not_team_typos(self):
+        for word in ("ask", "got", "mind", "miss"):
+            self.assertEqual(resolve_entities(f"can you {word} about it")["teams"], [], word)
+        self.assertEqual(resolve_entities("show mii matches")["teams"], ["MI"])
+        greeting = [{"role": "assistant", "content": "Search a season, or ask me to find one."}]
+        context = {"teams": ["RCB", "PBKS"]}
+        self.assertEqual(resolve_entities("Show me the ball-by-ball", history=greeting, ui_context=context)["teams"], ["RCB", "PBKS"])
+
+    def test_entity_resolver_uses_visible_match_when_nothing_is_named(self):
+        context = {"teams": ["RCB", "PBKS"], "season": 2025}
+        self.assertEqual(resolve_entities("Show me the ball-by-ball", ui_context=context)["teams"], ["RCB", "PBKS"])
+        self.assertEqual(resolve_entities("Show me the 2024 final", ui_context=context)["teams"], [])
+        self.assertEqual(resolve_entities("How did CSK do?", ui_context=context)["teams"], ["CSK"])
+
     @patch("backend.agent.tools.search_ipl_archive")
     def test_list_intent_returns_every_match_and_filters_ui(self, archive):
         archive.return_value = [

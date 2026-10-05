@@ -414,7 +414,6 @@ export default function Home() {
       const finalResult = result as AgentResult;
       setMessages((current) => [...current, { role: "assistant", content: finalResult.reply, tools: finalResult.tool_calls?.map((item) => item.name.replace("search_", "")) }]);
       applyActions(finalResult.ui_actions ?? []);
-      setAgentStatus("ready");
     } catch {
       setMessages((current) => [...current, { role: "assistant", content: "I lost the local backend for a moment. Your archive view is safe—once it’s back, send that again and I’ll pick up from here." }]);
       setAgentStatus("offline");
