@@ -6,27 +6,25 @@ from collections.abc import Iterator
 from datetime import datetime
 from typing import Any, TypedDict
 
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnableLambda
 from langgraph.graph import END, START, StateGraph
 
 from .gemma import GemmaCompletionClient
 from .entities import resolve_entities
+from .llm import GemmaProvider, LLMRouter
+from .match_facts import build_match_context, deterministic_summary, match_list_card, resolve_match
 from .tools import run_search, select_tools
 
 
-PROMPT = PromptTemplate.from_template(
-    """You are Pandit, a knowledgeable cricket friend inside Cricbot. Be warm, direct, and conversational.
-Answer using only the facts below. If a fact is unavailable, say so instead of guessing. Use at most four short sentences.
-Facts:
-{tool_results}
-Resolved entities: {entities}
-Dashboard context: {ui_context}
-Recent conversation: {history}
-Question: {message}
-Answer:"""
-)
+SYSTEM_PROMPT = """You are Pandit, the cricket analyst inside Cricbot. You talk like a sharp, friendly commentator.
+Rules:
+- Answer the user's question using ONLY the FACTS provided. Never invent scores, names, or statistics.
+- Lead with the direct answer, then the one or two details that explain it. Summarise; do not list the whole scorecard.
+- Copy numbers exactly as they appear in the facts. Do not calculate new figures.
+- For momentum, turning-point, or "where was it won/lost" questions, use the MOMENTUM SHIFTS lines: say who seized control, in which overs, how (collapse, burst, squeeze, chase pressure, missed chance), and the deliveries or commentary that show it. Lead with the largest shift.
+- If the facts do not contain the answer, say what is missing in one sentence.
+- At most five sentences. Plain text, no markdown tables or headings."""
+
+
 
 
 class PanditState(TypedDict, total=False):
@@ -50,17 +48,23 @@ class PanditState(TypedDict, total=False):
     validation: str
     intermediate_message: str
     tool_calls: list[dict[str, Any]]
+    match_target: dict[str, str] | None
+    match_facts: str
+    cards: list[dict[str, Any]]
+    provider: str
+    model: str
 
 
 GRAPH_NODES = [
     {"id": "normalize_request", "label": "Understand request", "kind": "input", "description": "Normalize the question, dashboard context, and recent conversation."},
     {"id": "extract_entities", "label": "Resolve cricket entities", "kind": "entity", "description": "Correct team typos and resolve teams, players, years, match terms, venues, and list intent."},
     {"id": "route_tools", "label": "Select tools", "kind": "routing", "description": "Choose match, player, standings, or analytics tools from the resolved retrieval query."},
-    {"id": "retrieve_facts", "label": "Retrieve cricket facts", "kind": "tool", "description": "Run the selected deterministic tools and collect grounded results."},
+    {"id": "retrieve_facts", "label": "Retrieve cricket facts", "kind": "tool", "description": "Search the match archive for the resolved teams, seasons, and stages."},
+    {"id": "load_match", "label": "Load match data", "kind": "tool", "description": "Fetch scorecard, ball-by-ball, and commentary for the match the question is about."},
     {"id": "summarize_context", "label": "Summarize evidence", "kind": "summary", "description": "Compress tool results and chat history into bounded model context."},
     {"id": "plan_ui", "label": "Plan UI actions", "kind": "action", "description": "Choose dashboard updates and the exact or model response branch."},
     {"id": "exact_response", "label": "Exact tool answer", "kind": "response", "description": "Answer analytics and control requests directly from tool output."},
-    {"id": "gemma_response", "label": "Gemma synthesis", "kind": "model", "description": "Use local Gemma 4 to turn grounded facts into natural language."},
+    {"id": "llm_response", "label": "LLM synthesis", "kind": "model", "description": "Summarise the grounded facts with Groq or OpenRouter (local Gemma as last resort)."},
     {"id": "validate_response", "label": "Grounding check", "kind": "validation", "description": "Reject unsupported numbers, repetition, and ungrounded model output."},
     {"id": "finalize", "label": "Finalize response", "kind": "output", "description": "Package the answer, provenance, trace, and safe UI actions."},
 ]
@@ -70,11 +74,12 @@ GRAPH_EDGES = [
     {"from": "normalize_request", "to": "extract_entities"},
     {"from": "extract_entities", "to": "route_tools"},
     {"from": "route_tools", "to": "retrieve_facts"},
-    {"from": "retrieve_facts", "to": "summarize_context"},
+    {"from": "retrieve_facts", "to": "load_match"},
+    {"from": "load_match", "to": "summarize_context"},
     {"from": "summarize_context", "to": "plan_ui"},
     {"from": "plan_ui", "to": "exact_response", "condition": "exhaustive list, exact analytics, or UI command"},
-    {"from": "plan_ui", "to": "gemma_response", "condition": "conversational synthesis"},
-    {"from": "gemma_response", "to": "validate_response"},
+    {"from": "plan_ui", "to": "llm_response", "condition": "conversational synthesis"},
+    {"from": "llm_response", "to": "validate_response"},
     {"from": "exact_response", "to": "finalize"},
     {"from": "validate_response", "to": "finalize"},
     {"from": "finalize", "to": "end"},
@@ -84,13 +89,9 @@ GRAPH_EDGES = [
 class CricbotAgent:
     """Stateful LangGraph agent with deterministic tools and Gemma synthesis."""
 
-    def __init__(self, gemma: GemmaCompletionClient | None = None):
-        self.gemma = gemma or GemmaCompletionClient()
-        self.chain = (
-            PROMPT
-            | RunnableLambda(lambda prompt: self.gemma.complete(prompt.to_string()))
-            | StrOutputParser()
-        )
+    def __init__(self, gemma: GemmaCompletionClient | None = None, llm: LLMRouter | None = None):
+        # An explicit Gemma client (tests, local-only setups) pins the router to it.
+        self.llm = llm or (LLMRouter([GemmaProvider(gemma)]) if gemma else LLMRouter())
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -99,45 +100,49 @@ class CricbotAgent:
         workflow.add_node("extract_entities", self._extract_entities)
         workflow.add_node("route_tools", self._route_tools)
         workflow.add_node("retrieve_facts", self._retrieve_facts)
+        workflow.add_node("load_match", self._load_match)
         workflow.add_node("summarize_context", self._summarize_context)
         workflow.add_node("plan_ui", self._plan_ui)
         workflow.add_node("exact_response", self._exact_response)
-        workflow.add_node("gemma_response", self._gemma_response)
+        workflow.add_node("llm_response", self._llm_response)
         workflow.add_node("validate_response", self._validate_response)
         workflow.add_node("finalize", self._finalize)
         workflow.add_edge(START, "normalize_request")
         workflow.add_edge("normalize_request", "extract_entities")
         workflow.add_edge("extract_entities", "route_tools")
         workflow.add_edge("route_tools", "retrieve_facts")
-        workflow.add_edge("retrieve_facts", "summarize_context")
+        workflow.add_edge("retrieve_facts", "load_match")
+        workflow.add_edge("load_match", "summarize_context")
         workflow.add_edge("summarize_context", "plan_ui")
         workflow.add_conditional_edges(
             "plan_ui",
             lambda state: state["response_route"],
-            {"exact": "exact_response", "model": "gemma_response"},
+            {"exact": "exact_response", "model": "llm_response"},
         )
         workflow.add_edge("exact_response", "finalize")
-        workflow.add_edge("gemma_response", "validate_response")
+        workflow.add_edge("llm_response", "validate_response")
         workflow.add_edge("validate_response", "finalize")
         workflow.add_edge("finalize", END)
         return workflow.compile()
 
     def status(self) -> dict[str, Any]:
-        ready = self.gemma.ready()
+        providers = self.llm.status()
+        active = next((provider for provider in providers if provider["ready"]), None)
         return {
-            "status": "ready" if ready else "offline",
-            "model": self.gemma.model,
-            "base_url": self.gemma.base_url,
-            "contract": "v1/completions",
+            "status": "ready" if active else "offline",
+            "provider": active["name"] if active else None,
+            "model": active["model"] if active else None,
+            "providers": providers,
+            "contract": "chat/completions",
             "orchestrator": "langgraph",
-            "graph_version": "1.2",
+            "graph_version": "2.0",
         }
 
     @staticmethod
     def graph_definition() -> dict[str, Any]:
         return {
             "name": "Pandit Cricket Assistant",
-            "version": "1.2",
+            "version": "2.0",
             "framework": "LangGraph",
             "nodes": GRAPH_NODES,
             "edges": GRAPH_EDGES,
@@ -183,11 +188,13 @@ class CricbotAgent:
             "tool_calls": current.get("tool_calls", []),
             "results": current.get("results", [])[:100 if current.get("entities", {}).get("wants_all") else 5],
             "ui_actions": current.get("actions", []),
-            "model": self.gemma.model,
+            "provider": current.get("provider") if current.get("model_used") else None,
+            "model": current.get("model") if current.get("model_used") else None,
             "model_used": current.get("model_used", False),
+            "cards": current.get("cards", []),
             "validation": current.get("validation", "exact-tool-output"),
             "trace": trace,
-            "graph_version": "1.2",
+            "graph_version": "2.0",
         }
         yield {"event": "result", "data": response}
 
@@ -231,15 +238,50 @@ class CricbotAgent:
 
     @staticmethod
     def _retrieve_facts(state: PanditState) -> PanditState:
-        limit = 100 if state.get("entities", {}).get("wants_all") else 10
-        results, _ = run_search(state.get("retrieval_query", state["query"]), limit=limit)
+        entities = state.get("entities", {})
+        limit = 100 if entities.get("wants_all") else 10
+        # Topics ("momentum", "ball-by-ball") describe the answer, not the match.
+        identifying = [*entities.get("teams", []), *(str(year) for year in entities.get("years", [])), *entities.get("match_terms", []), *entities.get("venues", [])]
+        if not identifying:
+            return {"results": [], "intermediate_message": "No team, season, stage, or venue named; using the match on screen if any."}
+        results, _ = run_search(" ".join(identifying), limit=limit)
+        # Only archive matches are real data; dashboard player/analytics/standings
+        # rows are demo samples and must never ground an answer.
+        results = [row for row in results if row.get("type") == "match" and (row.get("action") or {}).get("type") == "open_match"]
         return {
             "results": results,
-            "intermediate_message": f"Retrieved {len(results)} grounded result{'s' if len(results) != 1 else ''}.",
+            "intermediate_message": f"Found {len(results)} archive match{'es' if len(results) != 1 else ''}.",
+        }
+
+    @staticmethod
+    def _load_match(state: PanditState) -> PanditState:
+        entities = state.get("entities", {})
+        results = state.get("results", [])
+        target = resolve_match(entities, results, state.get("ui_context", {}))
+        if target:
+            built = build_match_context(target, state["query"])
+            if built:
+                facts, card, row = built
+                others = [item for item in results if item.get("id") != row["id"]]
+                return {
+                    "match_target": target, "match_facts": facts, "cards": [card], "results": [row, *others],
+                    "intermediate_message": f"Loaded {card['match']['title']} ({card['ball_count']} deliveries, {card['commentary_count']} with commentary).",
+                }
+        teams = " and ".join(entities.get("teams") or []) or "matching"
+        seasons = ", ".join(str(year) for year in entities.get("years") or [])
+        card = match_list_card(results, f"{teams} matches{f' in IPL {seasons}' if seasons else ''}")
+        return {
+            "match_target": None, "match_facts": "", "cards": [card] if card else [],
+            "intermediate_message": f"No single match resolved; listing {len(card['matches']) if card else 0} candidates.",
         }
 
     @staticmethod
     def _summarize_context(state: PanditState) -> PanditState:
+        if state.get("match_facts"):
+            return {
+                "compact_results": state["match_facts"],
+                "intermediate_message": "Built a facts sheet from the scorecard, overs, wickets, and commentary.",
+            }
         compact_results = "\n".join(
             f"- {row['title']}: {row['subtitle']} ({row['meta']})"
             for row in state.get("results", [])[:8]
@@ -250,7 +292,7 @@ class CricbotAgent:
         }
 
     def _plan_ui(self, state: PanditState) -> PanditState:
-        actions = self._ui_actions(state["query"], state.get("results", []), state.get("entities"))
+        actions = self._ui_actions(state["query"], state.get("results", []), state.get("entities"), state.get("match_target"), state.get("ui_context", {}))
         response_route = "exact" if self._needs_exact_tool_answer(state["query"], state.get("entities")) else "model"
         return {
             "actions": actions,
@@ -260,28 +302,32 @@ class CricbotAgent:
 
     def _exact_response(self, state: PanditState) -> PanditState:
         return {
-            "reply": self._fallback_reply(state["query"], state.get("results", []), state.get("entities")),
+            "reply": self._grounded_fallback(state),
             "model_used": False,
             "validation": "exact-tool-output",
             "intermediate_message": "Used deterministic tool output to preserve exact analytics.",
         }
 
-    def _gemma_response(self, state: PanditState) -> PanditState:
-        candidate = ""
+    def _llm_response(self, state: PanditState) -> PanditState:
+        history = [
+            {"role": "assistant" if item.get("role") == "assistant" else "user", "content": str(item.get("content", ""))[:600]}
+            for item in state.get("history", [])[-6:]
+        ]
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            *history,
+            {"role": "user", "content": f"FACTS:\n{state['compact_results']}\n\nQUESTION: {state['query']}"},
+        ]
         try:
-            candidate = self.chain.invoke({
-                "message": state["query"],
-                "history": state["compact_history"],
-                "entities": json.dumps(state.get("entities", {}), ensure_ascii=False),
-                "ui_context": json.dumps(state.get("ui_context", {}), ensure_ascii=False),
-                "tool_results": state["compact_results"],
-            }).strip()
-        except (RuntimeError, OSError):
-            pass
+            candidate, provider, model = self.llm.chat(messages)
+        except RuntimeError as exc:
+            return {
+                "candidate": "", "model_used": False, "provider": "", "model": "",
+                "intermediate_message": f"No LLM answered ({str(exc)[:160]}); preparing a grounded fallback.",
+            }
         return {
-            "candidate": candidate,
-            "model_used": bool(candidate),
-            "intermediate_message": "Gemma produced a grounded candidate." if candidate else "Gemma was unavailable; prepared a deterministic fallback.",
+            "candidate": candidate, "model_used": True, "provider": provider, "model": model,
+            "intermediate_message": f"{provider} ({model}) summarised the facts.",
         }
 
     def _validate_response(self, state: PanditState) -> PanditState:
@@ -291,14 +337,19 @@ class CricbotAgent:
             state["compact_results"],
             state["query"],
         )
-        reply = self._limit_sentences(candidate) if grounded else self._fallback_reply(
-            state["query"], state.get("results", []), state.get("entities")
-        )
+        reply = self._limit_sentences(candidate) if grounded else self._grounded_fallback(state)
         return {
             "reply": reply,
+            "model_used": grounded,
             "validation": "grounded" if grounded else "fallback-after-validation",
             "intermediate_message": "Candidate passed numeric grounding checks." if grounded else "Candidate was replaced with grounded tool output.",
         }
+
+    def _grounded_fallback(self, state: PanditState) -> str:
+        cards = state.get("cards") or []
+        if cards and cards[0]["type"] == "match" and state.get("entities", {}).get("intent") != "list_matches":
+            return deterministic_summary(cards[0])
+        return self._fallback_reply(state["query"], state.get("results", []), state.get("entities"))
 
     def _finalize(self, state: PanditState) -> PanditState:
         results = state.get("results", [])
@@ -366,8 +417,17 @@ class CricbotAgent:
                 "response_route": patch.get("response_route"),
                 "ui_actions": patch.get("actions", []),
             }
-        if node == "gemma_response":
+        if node == "load_match":
+            card = (patch.get("cards") or [{}])[0]
             return {
+                "match_target": patch.get("match_target"),
+                "card": card.get("type"),
+                "facts_preview": patch.get("match_facts", "")[:900],
+            }
+        if node == "llm_response":
+            return {
+                "provider": patch.get("provider"),
+                "model": patch.get("model"),
                 "model_used": patch.get("model_used", False),
                 "candidate": patch.get("candidate", "")[:900],
             }
@@ -390,23 +450,22 @@ class CricbotAgent:
         message: str,
         results: list[dict[str, Any]],
         entities: dict[str, Any] | None = None,
+        target: dict[str, str] | None = None,
+        ui_context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         text = message.casefold()
         actions = []
         resolved = entities or {}
+        context = ui_context or {}
         if resolved.get("intent") == "list_matches":
             actions.append({
                 "type": "set_archive_filters",
                 "season": (resolved.get("years") or [resolved.get("ui_season")])[0],
                 "query": (resolved.get("teams") or [""])[0],
             })
-        else:
-            for row in results:
-                action = row.get("action")
-                if action and action not in actions:
-                    actions.append(action)
-                if len(actions) >= 2:
-                    break
+        elif target and (target.get("match_slug") != context.get("match_slug") or target.get("series_slug") != context.get("series_slug")):
+            # Only open a match Pandit actually resolved, never a guess.
+            actions.append({"type": "open_match", **target})
         if "ball by ball" in text or "ball-by-ball" in text or "commentary" in text:
             actions.insert(0, {"type": "set_match_tab", "tab": "balls"})
         elif "momentum" in text or "analysis" in text or "analytics" in text:
@@ -469,10 +528,10 @@ class CricbotAgent:
     @staticmethod
     def _needs_exact_tool_answer(message: str, entities: dict[str, Any] | None = None) -> bool:
         text = message.casefold()
-        return (entities or {}).get("intent") == "list_matches" or any(token in text for token in (
-            "momentum", "swing", "probability", "impact", "best", "top",
-            "standings", "points table", "rank", "pitch", "conditions",
-        ))
+        # Lists must be exhaustive and theme switches need no prose; everything
+        # else is summarised from the facts sheet.
+        command = any(phrase in text for phrase in ("light mode", "dark mode")) and len(text.split()) <= 6
+        return (entities or {}).get("intent") == "list_matches" or command
 
     @staticmethod
     def _resolution_note(entities: dict[str, Any]) -> str:

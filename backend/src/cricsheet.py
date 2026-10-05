@@ -27,6 +27,7 @@ import zipfile
 IPL_ZIP_URL = "https://cricsheet.org/downloads/ipl_json.zip"
 DEFAULT_DIR = Path(__file__).resolve().parents[1] / "data" / "cricsheet" / "ipl"
 INDEX_FILE = "index.json"
+INDEX_VERSION = 2
 
 # Cricsheet keeps the name a franchise used at the time; the archive uses the
 # current one. Both sides collapse to one key before matching.
@@ -72,18 +73,40 @@ def build_index(directory: Path) -> list[dict[str, Any]]:
         if path.name == INDEX_FILE:
             continue
         try:
-            info = json.loads(path.read_text(encoding="utf-8")).get("info", {})
+            payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        entries.append({
-            "file": path.name,
-            "dates": info.get("dates", []),
-            "teams": info.get("teams", []),
-            "event": info.get("event", {}),
-            "venue": info.get("venue", ""),
-        })
-    (directory / INDEX_FILE).write_text(json.dumps(entries), encoding="utf-8")
+        entries.append(index_entry(path.stem, payload))
+    (directory / INDEX_FILE).write_text(json.dumps({"version": INDEX_VERSION, "matches": entries}), encoding="utf-8")
     return entries
+
+
+def index_entry(match_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Everything the archive list needs, so listing never opens match files."""
+    from backend.src.cricsheet_scorecard import derive_scorecard, result_text, toss_text
+
+    info = payload.get("info", {})
+    dates = info.get("dates", [])
+    innings = derive_scorecard(payload)["content"]["innings"]
+    event = info.get("event", {})
+    return {
+        "id": str(match_id),
+        "file": f"{match_id}.json",
+        # IPL seasons sit inside one calendar year; Cricsheet's own season field
+        # is "2007/08" for 2008 and "2020/21" for 2020, so the date is safer.
+        "season": int(dates[0][:4]) if dates else None,
+        "dates": dates,
+        "teams": info.get("teams", []),
+        "venue": info.get("venue", ""),
+        "city": info.get("city", ""),
+        "stage": event.get("stage") or (f"Match {event['match_number']}" if event.get("match_number") else ""),
+        "result": result_text(info),
+        "winner": info.get("outcome", {}).get("winner"),
+        "toss": toss_text(info),
+        "player_of_match": info.get("player_of_match", []),
+        "innings": [{"team": row["team"]["name"], "runs": row["runs"], "wickets": row["wickets"], "overs": row["overs"]} for row in innings],
+        "version": payload.get("meta", {}).get("data_version", ""),
+    }
 
 
 @lru_cache(maxsize=2)
@@ -93,10 +116,33 @@ def _index(directory: str) -> tuple[dict[str, Any], ...]:
         return ()
     index_path = path / INDEX_FILE
     try:
-        entries = json.loads(index_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        entries = build_index(path) if any(path.glob("*.json")) else []
+        stored = json.loads(index_path.read_text(encoding="utf-8"))
+        entries = stored["matches"] if stored.get("version") == INDEX_VERSION else None
+    except (OSError, ValueError, AttributeError, KeyError):
+        entries = None
+    if entries is None:
+        entries = build_index(path) if any(p for p in path.glob("*.json") if p.name != INDEX_FILE) else []
     return tuple(entries)
+
+
+def entries() -> tuple[dict[str, Any], ...]:
+    return _index(str(data_dir()))
+
+
+def seasons() -> list[int]:
+    return sorted({entry["season"] for entry in entries() if entry.get("season")}, reverse=True)
+
+
+def by_id(match_id: str) -> dict[str, Any] | None:
+    return next((entry for entry in entries() if entry["id"] == str(match_id)), None)
+
+
+def load(match_id: str) -> dict[str, Any] | None:
+    path = data_dir() / f"{match_id}.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 def find_match(match_date: str, team_names: list[str]) -> Path | None:

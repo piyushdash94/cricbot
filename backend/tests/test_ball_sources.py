@@ -110,23 +110,71 @@ class CricsheetTests(unittest.TestCase):
         self.assertTrue((target / "1000.json").exists())
         self.assertFalse((target / "README.txt").exists())
 
-    def test_match_detail_prefers_cricsheet_and_skips_live_feeds(self):
-        class Offline:
-            calls = []
+    def detail(self, client):
+        with tempfile.TemporaryDirectory() as cache, patch.object(ipl_data, "CACHE_DIR", Path(cache)), patch.object(ipl_data, "_client", return_value=client):
+            first = ipl_data.get_match_detail(ipl_data.IPL_SERIES[2025]["slug"], ipl_data.DEMO_MATCH_SLUG)
+            second = ipl_data.get_match_detail(ipl_data.IPL_SERIES[2025]["slug"], ipl_data.DEMO_MATCH_SLUG)
+        return first, second
 
+    def test_cricsheet_is_canonical_when_providers_are_offline(self):
+        class Offline:
             def __getattr__(self, name):
                 def call(*_args):
-                    Offline.calls.append(name)
                     raise RuntimeError("offline")
                 return call
 
-        with patch.object(ipl_data, "_client", return_value=Offline()):
-            detail = ipl_data.get_match_detail(ipl_data.IPL_SERIES[2025]["slug"], ipl_data.DEMO_MATCH_SLUG)
+        detail, _ = self.detail(Offline())
         self.assertEqual(detail["ball_coverage"]["level"], "cricsheet")
         self.assertEqual(len(detail["balls"]), 8)
-        self.assertIn("Cricsheet", detail["sources"][2]["provider"])
-        self.assertNotIn("match_ball_by_ball", Offline.calls)
-        self.assertNotIn("match_commentary", Offline.calls)
+        self.assertEqual(detail["match"]["title"], "RCB vs PBKS")
+        self.assertEqual(detail["innings"][0]["runs"], 17)
+        self.assertEqual(detail["consistency"]["status"], "single-source")
+        self.assertFalse(next(row for row in detail["sources"] if row["name"] == "Commentary")["available"])
+
+    def test_espn_enrichment_is_merged_verified_and_cached(self):
+        reference = {"content": {"innings": [
+            {"team": {"abbreviation": "RCB"}, "runs": 17, "wickets": 1, "inningBatsmen": [], "inningBowlers": []},
+            {"team": {"abbreviation": "PBKS"}, "runs": 1, "wickets": 0, "inningBatsmen": [], "inningBowlers": []},
+        ]}}
+        commentary = [[{"id": str(index), "over": {"actual": float(f"0.{index}")}, "innings": {"number": 1}, "playType": {"description": "run"}, "scoreValue": 0, "text": f"line {index}"} for index in range(1, 8)]]
+
+        class Online:
+            calls: list = []
+
+            def match_scorecard(self, *_args):
+                Online.calls.append("match_scorecard")
+                return reference
+
+            def match_ball_by_ball(self, *_args):
+                Online.calls.append("match_ball_by_ball")
+                return commentary
+
+            def __getattr__(self, _name):
+                def missing(*_args):
+                    raise RuntimeError("unused")
+                return missing
+
+        detail, again = self.detail(Online())
+        self.assertEqual(detail["consistency"]["status"], "verified")
+        self.assertEqual(detail["commentary_count"], 7)
+        self.assertEqual(detail["balls"][0]["commentary"], "line 1")
+        self.assertEqual(again["commentary_count"], 7)
+        self.assertEqual(sorted(Online.calls), ["match_ball_by_ball", "match_scorecard"])  # second load came from cache
+
+    def test_result_is_checked_against_derived_scorecard(self):
+        innings = [{"team": "RCB", "runs": 190, "wickets": 9}, {"team": "PBKS", "runs": 184, "wickets": 7}]
+        info = {"outcome": {"winner": "Royal Challengers Bengaluru", "by": {"runs": 6}}}
+        self.assertEqual(ipl_data.internal_check(info, innings)["status"], "ok")
+        self.assertEqual(ipl_data.internal_check({"outcome": {"winner": "Royal Challengers Bengaluru", "by": {"runs": 7}}}, innings)["status"], "mismatch")
+        chase = [{"team": "DCH", "runs": 150, "wickets": 8}, {"team": "KKR", "runs": 151, "wickets": 4}]
+        self.assertEqual(ipl_data.internal_check({"outcome": {"winner": "Kolkata Knight Riders", "by": {"wickets": 6}}}, chase)["status"], "ok")
+        self.assertEqual(ipl_data.internal_check({"outcome": {"winner": "Kolkata Knight Riders", "by": {"wickets": 5}}}, chase)["status"], "mismatch")
+        self.assertEqual(ipl_data.internal_check({"outcome": {"winner": "Kolkata Knight Riders", "by": {"wickets": 5}, "method": "D/L"}}, chase)["status"], "skipped")
+
+    def test_mismatch_is_reported(self):
+        canonical = [{"number": 1, "team": "RCB", "runs": 190, "wickets": 9}]
+        reference = {"content": {"innings": [{"team": {"abbreviation": "RCB"}, "runs": 191, "wickets": 9}]}}
+        self.assertEqual(ipl_data.consistency_check(canonical, reference)["status"], "mismatch")
 
 
 class EspnPlayByPlayTests(unittest.TestCase):

@@ -24,6 +24,12 @@ TEAM_ALIASES: dict[str, tuple[str, ...]] = {
     "DC": ("dc", "delhi capitals", "delhi daredevils"),
     "GT": ("gt", "gujarat titans"),
     "LSG": ("lsg", "lucknow super giants"),
+    # Defunct franchises, so any IPL season can be asked about.
+    "DCH": ("dch", "deccan chargers", "deccan"),
+    "GL": ("gujarat lions",),
+    "PWI": ("pwi", "pune warriors", "pune warriors india"),
+    "RPS": ("rps", "rising pune supergiant", "rising pune supergiants"),
+    "KTK": ("ktk", "kochi tuskers kerala", "kochi tuskers"),
 }
 
 PLAYER_ALIASES: dict[str, tuple[str, ...]] = {
