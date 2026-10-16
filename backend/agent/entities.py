@@ -24,6 +24,12 @@ TEAM_ALIASES: dict[str, tuple[str, ...]] = {
     "DC": ("dc", "delhi capitals", "delhi daredevils"),
     "GT": ("gt", "gujarat titans"),
     "LSG": ("lsg", "lucknow super giants"),
+    # Defunct franchises, so any IPL season can be asked about.
+    "DCH": ("dch", "deccan chargers", "deccan"),
+    "GL": ("gujarat lions",),
+    "PWI": ("pwi", "pune warriors", "pune warriors india"),
+    "RPS": ("rps", "rising pune supergiant", "rising pune supergiants"),
+    "KTK": ("ktk", "kochi tuskers kerala", "kochi tuskers"),
 }
 
 PLAYER_ALIASES: dict[str, tuple[str, ...]] = {
@@ -45,6 +51,7 @@ MATCH_TERMS = (
     "final", "qualifier", "eliminator", "playoff", "semi-final", "semifinal",
     "opener", "opening match", "league match", "live match",
 )
+UNIQUE_MATCH_TERMS = {"final", "qualifier", "eliminator", "semi-final", "semifinal", "opener", "opening match"}
 
 TOPICS = (
     "analytics", "analysis", "impact", "momentum", "pitch", "conditions",
@@ -65,6 +72,7 @@ FUZZY_TEAM_BLOCKLIST = {
     "all", "and", "are", "can", "did", "for", "get", "had", "has", "last",
     "list", "match", "matches", "not", "see", "show", "the", "this", "was",
     "what", "when", "where", "who", "won", "year", "you",
+    "got", "mind", "miss", "mine", "gym", "set",
 }
 
 
@@ -76,16 +84,20 @@ def _exact_entities(text: str, aliases: dict[str, tuple[str, ...]]) -> list[str]
     return [canonical for canonical, names in aliases.items() if any(_contains_phrase(text, name) for name in names)]
 
 
-def _team_entities(text: str) -> tuple[list[str], list[dict[str, str]]]:
+def _team_entities(text: str, *, fuzzy: bool = True) -> tuple[list[str], list[dict[str, str]]]:
     teams = _exact_entities(text, TEAM_ALIASES)
     corrections: list[dict[str, str]] = []
+    if not fuzzy:
+        return teams, corrections
     abbreviations = tuple(TEAM_ALIASES)
     for token in re.findall(r"\b[a-z]{3,4}\b", text):
         if token in FUZZY_TEAM_BLOCKLIST or any(token in aliases for aliases in TEAM_ALIASES.values()):
             continue
         candidate = max(abbreviations, key=lambda abbreviation: SequenceMatcher(None, token.upper(), abbreviation).ratio())
         confidence = SequenceMatcher(None, token.upper(), candidate).ratio()
-        if confidence >= 0.66 and candidate not in teams:
+        # Typos keep the first letter ("rcv" -> RCB); "ask" -> CSK is not a typo.
+        close_length = abs(len(token) - len(candidate)) <= 1
+        if confidence >= 0.66 and token[0].upper() == candidate[0] and close_length and candidate not in teams:
             teams.append(candidate)
             corrections.append({"from": token.upper(), "to": candidate, "type": "team_typo"})
     return teams, corrections
@@ -139,14 +151,19 @@ def resolve_entities(
     teams, corrections = _team_entities(text)
     players = _exact_entities(text, PLAYER_ALIASES)
 
-    # Carry a previously discussed entity only when the new message omitted it.
-    if not teams:
+    # Carry a previously discussed entity only when the new message omitted it
+    # and does not already name a single fixture ("the 2024 final").
+    terms = [term for term in MATCH_TERMS if _contains_phrase(text, term)]
+    venues = _exact_entities(text, VENUES)
+    self_contained = bool(teams or players or venues) or any(term in UNIQUE_MATCH_TERMS for term in terms)
+    if not self_contained:
         for item in reversed(history or []):
-            prior_teams, _ = _team_entities(item.get("content", "").casefold())
+            # History includes Pandit's own prose, so only exact names count.
+            prior_teams, _ = _team_entities(item.get("content", "").casefold(), fuzzy=False)
             if prior_teams:
                 teams = prior_teams
                 break
-    if not players:
+    if not self_contained:
         for item in reversed(history or []):
             prior_players = _exact_entities(item.get("content", "").casefold(), PLAYER_ALIASES)
             if prior_players:
@@ -155,9 +172,12 @@ def resolve_entities(
 
     years, temporal_reference, temporal_corrections = _temporal_entities(text, year)
     corrections.extend(temporal_corrections)
-    terms = [term for term in MATCH_TERMS if _contains_phrase(text, term)]
+    # With nothing named and nothing to carry, the question is about the match
+    # on screen ("show me the ball-by-ball"), unless it moves to another season.
+    visible = [str(team).upper() for team in (ui_context or {}).get("teams") or [] if team]
+    if not self_contained and not teams and not players and not years and len(visible) == 2:
+        teams = visible
     topics = [topic for topic in TOPICS if _contains_phrase(text, topic)]
-    venues = _exact_entities(text, VENUES)
     intent, wants_all = _intent(text, teams, players)
 
     corrected_query = message.strip()

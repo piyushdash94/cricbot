@@ -94,42 +94,78 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(any(tool["owner"] == "extract_entities" for tool in payload["tools"]))
         self.assertTrue(any(tool["owner"] == "retrieve_facts" for tool in payload["tools"]))
         self.assertTrue(any(edge.get("condition") for edge in payload["transitions"]))
-        self.assertEqual(payload["coverage"][0]["level"], "full")
+        levels = [item["level"] for item in payload["coverage"]]
+        self.assertEqual(levels[:2], ["cricsheet", "full"])
 
-    @patch.object(agent.gemma, "complete", return_value="RCB's biggest swing came late, and I opened the momentum view.")
-    def test_agent_returns_grounded_actions(self, complete):
+    @patch.object(agent.llm, "chat", return_value=("RCB's biggest swing came late, and the momentum view shows it.", "groq", "llama-3.3-70b-versatile"))
+    def test_agent_loads_the_match_and_summarises_with_llm(self, chat):
         response = self.client.post("/api/agent/chat", json={
             "message": "Show me the momentum for RCB vs PBKS",
             "history": [],
-            "ui_context": {"selected_match": "rcb-pbks"},
+            "ui_context": {},
         })
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertFalse(payload["model_used"])
-        complete.assert_not_called()
-        self.assertIn("Biggest momentum swing", payload["reply"])
-        self.assertIn("search_matches", [call["name"] for call in payload["tool_calls"]])
+        self.assertTrue(payload["model_used"])
+        self.assertEqual(payload["provider"], "groq")
+        chat.assert_called_once()
+        facts = chat.call_args.args[0][-1]["content"]
+        self.assertIn("Result: RCB won by 6 runs", facts)
+        self.assertIn("Batting:", facts)
+        self.assertEqual(payload["cards"][0]["type"], "match")
+        self.assertEqual(payload["cards"][0]["match"]["title"], "RCB vs PBKS")
         self.assertIn({"type": "set_match_tab", "tab": "analytics"}, payload["ui_actions"])
+        self.assertTrue(any(action["type"] == "open_match" for action in payload["ui_actions"]))
         visited = [event["node"] for event in payload["trace"]]
-        self.assertEqual(visited[0], "normalize_request")
-        self.assertEqual(visited[1], "extract_entities")
-        self.assertIn("exact_response", visited)
-        self.assertNotIn("gemma_response", visited)
+        self.assertEqual(visited[:2], ["normalize_request", "extract_entities"])
+        self.assertIn("load_match", visited)
+        self.assertIn("llm_response", visited)
         self.assertEqual(visited[-1], "finalize")
 
-    @patch.object(agent.gemma, "complete", return_value="RCB won by 6 runs.")
-    def test_streaming_agent_emits_trace_before_result(self, _complete):
+    @patch.object(agent.llm, "chat", return_value=("RCB won by 60 runs thanks to 99 from Kohli.", "openrouter", "test-model"))
+    def test_invented_numbers_fall_back_to_grounded_recap(self, _chat):
+        payload = self.client.post("/api/agent/chat", json={"message": "Tell me about RCB vs PBKS", "history": [], "ui_context": {}}).json()
+        self.assertFalse(payload["model_used"])
+        self.assertEqual(payload["validation"], "fallback-after-validation")
+        self.assertIn("RCB won by 6 runs", payload["reply"])
+        self.assertNotIn("99", payload["reply"])
+
+    @patch.object(agent.llm, "chat", side_effect=RuntimeError("groq: offline; openrouter: offline"))
+    def test_offline_llm_still_answers_from_facts(self, _chat):
+        payload = self.client.post("/api/agent/chat", json={"message": "Tell me about RCB vs PBKS", "history": [], "ui_context": {}}).json()
+        self.assertFalse(payload["model_used"])
+        self.assertIn("RCB won by 6 runs", payload["reply"])
+        self.assertEqual(payload["cards"][0]["type"], "match")
+
+    def test_offline_momentum_question_leads_with_the_decisive_shift(self):
+        from backend.agent.match_facts import deterministic_summary
+        card = {
+            "match": {"title": "RCB vs PBKS", "status_text": "RCB won by 6 runs", "season": 2025, "label": "Final"},
+            "innings": [], "player_of_match": [],
+            "momentum_shifts": [
+                {"type": "wicket_cluster", "innings_team": "PBKS", "from": "16.1", "to": "17.4", "headline": "3 wickets for 9 runs in 10 balls",
+                 "score_before": "150/4", "score_after": "159/7", "favours": "RCB", "magnitude": 30.0, "decisive": True},
+                {"type": "scoring_burst", "innings_team": "PBKS", "from": "5.1", "to": "6.6", "headline": "34 runs in 2 overs with 6 boundaries",
+                 "score_before": "40/1", "score_after": "74/1", "favours": "PBKS", "magnitude": 14.0},
+            ],
+        }
+        reply = deterministic_summary(card, "Where did this match turn?")
+        self.assertIn("decisive shift was a wicket cluster in the PBKS innings, overs 16.1–17.4", reply)
+        self.assertIn("scoring burst in overs 5.1–6.6", reply)
+        self.assertNotIn("decisive", deterministic_summary(card, "Give me the scorecard"))
+
+    @patch.object(agent.llm, "chat", return_value=("RCB won by 6 runs.", "groq", "m"))
+    def test_streaming_agent_emits_trace_before_result(self, _chat):
         response = self.client.post("/api/agent/chat/stream", json={
             "message": "Tell me about RCB vs PBKS",
             "history": [],
-            "ui_context": {"selected_match": "rcb-pbks"},
+            "ui_context": {},
         })
         self.assertEqual(response.status_code, 200)
         events = [__import__("json").loads(line) for line in response.text.splitlines()]
         self.assertEqual(events[0]["event"], "trace")
         self.assertEqual(events[-1]["event"], "result")
-        self.assertIn("gemma_response", [item["data"].get("node") for item in events[:-1]])
-
+        self.assertIn("llm_response", [item["data"].get("node") for item in events[:-1]])
 
 
 if __name__ == "__main__":
