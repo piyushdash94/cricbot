@@ -43,22 +43,53 @@ from typing import Any
 
 from . import store
 
-VIEWS = """
-CREATE OR REPLACE TEMP MACRO franchise(t) AS CASE t WHEN 'KXIP' THEN 'PBKS' ELSE t END;
+FRANCHISE_MACRO = """
+CREATE OR REPLACE TEMP MACRO franchise(t) AS
+    CASE t WHEN 'KXIP' THEN 'PBKS' WHEN 'DD' THEN 'DC' WHEN 'Kochi' THEN 'KTK' ELSE t END;
+"""
+
+
+def source_views(tables: set[str]) -> str:
+    """Temp views over whatever this database holds (older files may lack the Cricsheet tables)."""
+    has_cs = "cricsheet_balls" in tables
+    src = ("SELECT 'cricsheet' AS source, * FROM cricsheet_balls UNION ALL BY NAME "
+           "SELECT 'espn' AS source, * FROM balls WHERE match_id NOT IN (SELECT DISTINCT match_id FROM cricsheet_balls)"
+           if has_cs else "SELECT 'espn' AS source, *, 0 AS penalty_runs FROM balls")
+    cs_names = "UNION ALL SELECT player_id, NULL, name FROM players" if "players" in tables else ""
+    return f"""
+CREATE OR REPLACE TEMP VIEW src AS {src};
+
+-- ESPN spells names in full (Virat Kohli); Cricsheet uses initials (V Kohli). Same ids in both.
+CREATE OR REPLACE TEMP VIEW pnames AS
+SELECT player_id, coalesce(max(espn), max(cs)) AS name FROM (
+    SELECT batter_id AS player_id, batter AS espn, NULL AS cs FROM balls
+    UNION ALL SELECT bowler_id, bowler, NULL FROM balls
+    {cs_names}
+) WHERE player_id IS NOT NULL GROUP BY player_id;
 
 CREATE OR REPLACE TEMP VIEW d AS
-SELECT b.*, year(m.start_date) AS year, m.start_date, m.venue, m.title AS match_title,
-       CASE WHEN b.over_number <= 6 THEN 'powerplay' WHEN b.over_number <= 15 THEN 'middle' ELSE 'death' END AS phase
-FROM balls b JOIN matches m USING (match_id)
-WHERE b.inning <= 2;
+SELECT s.* REPLACE (coalesce(nb.name, s.batter) AS batter, coalesce(nw.name, s.bowler) AS bowler,
+                    coalesce(no.name, s.player_out) AS player_out),
+       s.runs_total - s.bye_runs - s.legbye_runs - coalesce(s.penalty_runs, 0) AS bowler_runs,
+       year(m.start_date) AS year, m.start_date, m.venue, m.title AS match_title,
+       CASE WHEN s.over_number <= 6 THEN 'powerplay' WHEN s.over_number <= 15 THEN 'middle' ELSE 'death' END AS phase
+FROM src s JOIN matches m USING (match_id)
+LEFT JOIN pnames nb ON nb.player_id = s.batter_id
+LEFT JOIN pnames nw ON nw.player_id = s.bowler_id
+LEFT JOIN pnames no ON no.player_id = s.player_out_id
+WHERE s.inning <= 2;
+"""
 
+
+VIEWS = """
 -- A batter innings exists if the player faced a ball OR was dismissed (non-striker run out for 0 off 0).
 CREATE OR REPLACE TEMP VIEW bat_inn AS
 WITH faced AS (
     SELECT match_id, inning, year, batter_id AS player_id, any_value(batter) AS player,
            any_value(batting_team) AS team,
            sum(runs_bat) AS runs, count(*) FILTER (WHERE NOT is_wide) AS balls,
-           count(*) FILTER (WHERE is_four) AS fours, count(*) FILTER (WHERE is_six) AS sixes
+           count(*) FILTER (WHERE is_four) AS fours, count(*) FILTER (WHERE is_six) AS sixes,
+           min(sequence) AS first_ball
     FROM d GROUP BY match_id, inning, year, batter_id
 ), outs AS (
     SELECT match_id, inning, year, player_out_id AS player_id, any_value(player_out) AS player,
@@ -69,13 +100,14 @@ SELECT coalesce(f.match_id, o.match_id) AS match_id, coalesce(f.inning, o.inning
        coalesce(f.year, o.year) AS year, coalesce(f.player_id, o.player_id) AS player_id,
        coalesce(f.player, o.player) AS player, coalesce(f.team, o.team) AS team,
        coalesce(f.runs, 0) AS runs, coalesce(f.balls, 0) AS balls,
-       coalesce(f.fours, 0) AS fours, coalesce(f.sixes, 0) AS sixes, o.player_id IS NOT NULL AS is_out
+       coalesce(f.fours, 0) AS fours, coalesce(f.sixes, 0) AS sixes, o.player_id IS NOT NULL AS is_out,
+       f.first_ball
 FROM faced f FULL OUTER JOIN outs o USING (match_id, inning, player_id);
 
 CREATE OR REPLACE TEMP VIEW bowl_inn AS
 SELECT match_id, inning, year, bowler_id AS player_id, any_value(bowler) AS player,
        count(*) FILTER (WHERE is_legal) AS balls,
-       sum(runs_total - bye_runs - legbye_runs) AS conceded,
+       sum(bowler_runs) AS conceded,
        count(*) FILTER (WHERE bowler_wicket) AS wickets
 FROM d GROUP BY match_id, inning, year, bowler_id;
 """
@@ -147,16 +179,9 @@ def top_bowlers(q: "Q", a: argparse.Namespace) -> None:
 
 
 def player(q: "Q", a: argparse.Namespace) -> None:
-    found = q.rows("""
-        SELECT player_id, any_value(player) AS player,
-               count(*) FILTER (WHERE src = 'bat') AS bat_inns, count(*) FILTER (WHERE src = 'bowl') AS bowl_inns,
-               min(year) AS first, max(year) AS last
-        FROM (SELECT player_id, player, year, 'bat' AS src FROM bat_inn
-              UNION ALL SELECT player_id, player, year, 'bowl' FROM bowl_inn)
-        WHERE player ILIKE '%' || $name || '%' OR CAST(player_id AS VARCHAR) = $name
-        GROUP BY player_id ORDER BY bat_inns + bowl_inns DESC""", name=a.name)
+    found = q.rows(PLAYER_SEARCH, name=a.name)
     if not found:
-        print(f"No player matching '{a.name}'.")
+        q.note(f"No player matching '{a.name}'.")
         return
     exact = [r for r in found if r["player"].casefold() == a.name.casefold() or str(r["player_id"]) == a.name]
     if exact:
@@ -169,7 +194,7 @@ def player(q: "Q", a: argparse.Namespace) -> None:
     did = q.rows(f"""SELECT (SELECT count(*) FROM bat_inn WHERE player_id = $pid AND {YEARS}) AS bat,
                             (SELECT count(*) FROM bowl_inn WHERE player_id = $pid AND {YEARS}) AS bowl""")[0]
     if not did["bat"] and not did["bowl"]:
-        print(f"{name} has no innings {q.span}.")
+        q.note(f"{name} has no innings {q.span}.")
         return
     if did["bat"]:
         _player_batting(q, name)
@@ -191,8 +216,8 @@ def _player_bowling(q: "Q", name: str) -> None:
         FROM bowl_inn WHERE player_id = $pid AND {YEARS}
         GROUP BY ROLLUP (year) ORDER BY year NULLS LAST""")
     q.table(f"{name}: bowling by phase {q.span}", f"""
-        SELECT phase, count(*) FILTER (WHERE is_legal) AS balls, sum(runs_total - bye_runs - legbye_runs) AS runs,
-               round(6.0 * sum(runs_total - bye_runs - legbye_runs) / nullif(count(*) FILTER (WHERE is_legal), 0), 2) AS econ,
+        SELECT phase, count(*) FILTER (WHERE is_legal) AS balls, sum(bowler_runs) AS runs,
+               round(6.0 * sum(bowler_runs) / nullif(count(*) FILTER (WHERE is_legal), 0), 2) AS econ,
                round(100.0 * count(*) FILTER (WHERE is_legal AND runs_total = 0) / nullif(count(*) FILTER (WHERE is_legal), 0), 1) AS dot_pct,
                count(*) FILTER (WHERE bowler_wicket) AS wkts
         FROM d WHERE bowler_id = $pid AND {YEARS}
@@ -213,8 +238,8 @@ def phase(q: "Q", a: argparse.Namespace) -> None:
     else:
         q.table(f"Best {a.phase} bowlers by economy {q.span} (min {a.min_balls} balls)", f"""
             SELECT any_value(bowler) AS player, count(*) FILTER (WHERE is_legal) AS balls,
-                   sum(runs_total - bye_runs - legbye_runs) AS runs,
-                   round(6.0 * sum(runs_total - bye_runs - legbye_runs) / count(*) FILTER (WHERE is_legal), 2) AS econ,
+                   sum(bowler_runs) AS runs,
+                   round(6.0 * sum(bowler_runs) / count(*) FILTER (WHERE is_legal), 2) AS econ,
                    count(*) FILTER (WHERE bowler_wicket) AS wkts,
                    round(100.0 * count(*) FILTER (WHERE is_legal AND runs_total = 0) / count(*) FILTER (WHERE is_legal), 1) AS dot_pct
             FROM d WHERE phase = $phase AND {YEARS}
@@ -227,8 +252,9 @@ def matches(q: "Q", a: argparse.Namespace) -> None:
     q.params["vs"] = q.team(a.vs)
     q.table(f"Matches {q.span}", f"""
         SELECT m.match_id, m.start_date AS date, m.title, franchise(m.team1) AS team1, franchise(m.team2) AS team2,
-               m.status_text AS result, coalesce(l.status, 'not ingested') AS data
-        FROM matches m LEFT JOIN ingest_log l USING (match_id)
+               m.status_text AS result,
+               coalesce((SELECT any_value(source) FROM src WHERE src.match_id = m.match_id), 'no balls') AS data
+        FROM matches m
         WHERE year(m.start_date) BETWEEN $y0 AND $y1
           AND ($team = '' OR $team IN (franchise(m.team1), franchise(m.team2)))
           AND ($vs = '' OR $vs IN (franchise(m.team1), franchise(m.team2)))
@@ -237,13 +263,13 @@ def matches(q: "Q", a: argparse.Namespace) -> None:
 
 def match(q: "Q", a: argparse.Namespace) -> None:
     q.params["mid"] = a.match_id
-    info = q.rows("""SELECT m.*, l.status FROM matches m LEFT JOIN ingest_log l USING (match_id)
-                     WHERE match_id = $mid""")
+    info = q.rows("""SELECT m.*, (SELECT any_value(source) FROM src WHERE src.match_id = m.match_id) AS source
+                     FROM matches m WHERE match_id = $mid""")
     if not info:
-        print(f"Match {a.match_id} is not in the database. Find ids with: python -m backend.db.queries matches --year YYYY")
+        q.note(f"Match {a.match_id} is not in the database. Find ids with: python -m backend.db.queries matches --year YYYY")
         return
     m = info[0]
-    print(f"\n{m['title']}, {m['start_date']}, {m['venue']}\n{m['status_text']}   [data: {m['status'] or 'not ingested'}]")
+    q.note(f"{m['title']}, {m['start_date']}, {m['venue']}\n{m['status_text']}   [balls: {m['source'] or 'none'}]")
     for (inning,) in q.con.execute("SELECT DISTINCT inning FROM d WHERE match_id = $mid ORDER BY 1", {"mid": a.match_id}).fetchall():
         q.params["inn"] = inning
         tot = q.rows("""SELECT any_value(batting_team) AS team, sum(runs_total) AS runs,
@@ -252,16 +278,23 @@ def match(q: "Q", a: argparse.Namespace) -> None:
                                sum(bye_runs) AS b, sum(legbye_runs) AS lb
                         FROM d WHERE match_id = $mid AND inning = $inn""")[0]
         overs = f"{tot['balls'] // 6}.{tot['balls'] % 6}" if tot["balls"] % 6 else str(tot["balls"] // 6)
-        print(f"\n=== Innings {inning}: {tot['team']} {tot['runs']}/{tot['wkts']} ({overs} ov)  "
-              f"extras {tot['extras']} (w {tot['w']}, nb {tot['nb']}, b {tot['b']}, lb {tot['lb']})")
+        q.note(f"=== Innings {inning}: {tot['team']} {tot['runs']}/{tot['wkts']} ({overs} ov)  "
+               f"extras {tot['extras']} (w {tot['w']}, nb {tot['nb']}, b {tot['b']}, lb {tot['lb']})")
         q.table("Batting", """
-            SELECT bi.player, coalesce(r.dismissal, CASE WHEN bi.is_out THEN 'out' ELSE 'not out' END) AS dismissal,
+            SELECT bi.player,
+                   coalesce(r.dismissal,
+                            CASE WHEN w.kind IS NULL THEN 'not out'
+                                 WHEN w.bowler_wicket THEN w.kind || ' b ' || w.bowler ELSE w.kind END) AS dismissal,
                    bi.runs AS r, bi.balls AS b, bi.fours AS "4s", bi.sixes AS "6s",
                    round(100.0 * bi.runs / nullif(bi.balls, 0), 1) AS sr
             FROM bat_inn bi
             LEFT JOIN ref_batting r ON r.match_id = bi.match_id AND r.inning = bi.inning AND r.player_id = bi.player_id
+            LEFT JOIN (SELECT player_out_id, any_value(dismissal_type) AS kind, any_value(bowler) AS bowler,
+                              bool_or(bowler_wicket) AS bowler_wicket
+                       FROM d WHERE match_id = $mid AND inning = $inn AND is_wicket GROUP BY player_out_id) w
+                   ON w.player_out_id = bi.player_id
             WHERE bi.match_id = $mid AND bi.inning = $inn
-            ORDER BY coalesce(r.position, 99)""")
+            ORDER BY coalesce(r.position, 99), bi.first_ball NULLS LAST""")
         q.table("Bowling", """
             SELECT player, balls // 6 || '.' || balls % 6 AS o, conceded AS r, wickets AS w,
                    round(6.0 * conceded / nullif(balls, 0), 2) AS econ
@@ -322,40 +355,67 @@ def h2h(q: "Q", a: argparse.Namespace) -> None:
 
 
 def commentary(q: "Q", a: argparse.Namespace) -> None:
+    """Commentary text exists only in the ESPN feed; Cricsheet-only matches show generated event lines."""
     q.params.update(mid=a.match_id, s=a.search or "", inn=a.inning or 0, width=0 if a.full else 140)
-    q.table(f"Commentary, match {a.match_id}" + (f" matching '{a.search}'" if a.search else ""), """
+    has_text = q.con.execute("SELECT count(*) FROM balls WHERE match_id = $mid AND commentary <> ''",
+                             {"mid": a.match_id}).fetchone()[0]
+    table = "balls" if has_text else "d"
+    if not has_text:
+        q.note("No ESPN commentary stored for this match (python -m backend.db.ingest adds it); "
+               "showing Cricsheet event lines.")
+    q.table(f"Commentary, match {a.match_id}" + (f" matching '{a.search}'" if a.search else ""), f"""
         SELECT inning AS inn, over_label AS ball, short_text AS event,
                CASE WHEN $width = 0 OR length(commentary) <= $width THEN commentary
                     ELSE left(commentary, $width) || '...' END AS commentary
-        FROM d WHERE match_id = $mid AND ($inn = 0 OR inning = $inn)
+        FROM {table} WHERE match_id = $mid AND inning <= 2 AND ($inn = 0 OR inning = $inn)
           AND ($s = '' OR short_text ILIKE '%' || $s || '%' OR commentary ILIKE '%' || $s || '%')
         ORDER BY inning, sequence LIMIT $limit""")
+
+
+def players(q: "Q", a: argparse.Namespace) -> None:
+    q.table(f"Players matching '{a.name}'", PLAYER_SEARCH, extra={"name": a.name})
 
 
 def sql(q: "Q", a: argparse.Namespace) -> None:
     q.table("Result", a.query, use_params=False)
 
 
+PLAYER_SEARCH = """
+    SELECT player_id, any_value(player) AS player,
+           count(*) FILTER (WHERE kind = 'bat') AS bat_inns, count(*) FILTER (WHERE kind = 'bowl') AS bowl_inns,
+           min(year) AS first, max(year) AS last
+    FROM (SELECT player_id, player, year, 'bat' AS kind FROM bat_inn
+          UNION ALL SELECT player_id, player, year, 'bowl' FROM bowl_inn)
+    WHERE player ILIKE '%' || $name || '%' OR CAST(player_id AS VARCHAR) = $name
+    GROUP BY player_id ORDER BY bat_inns + bowl_inns DESC LIMIT 25"""
+
+
 # ----------------------------------------------------------------- plumbing
 
+class NoDatabase(RuntimeError):
+    pass
+
+
 class Q:
+    """Runs one command and collects its output as blocks: {"type": "table"|"text", ...}."""
+
     def __init__(self, a: argparse.Namespace):
-        path = Path(a.db or store.DEFAULT_DB)
+        path = Path(getattr(a, "db", None) or store.DEFAULT_DB)
         if not path.exists():
-            sys.exit(f"No database at {path}. Run `python -m backend.db.ingest` first, or pass --db.")
+            raise NoDatabase(f"No database at {path}. Run `python -m backend.db.cricsheet_load --sync` first, or pass --db.")
         self.con = store.connect(path, read_only=True)
-        self.con.execute(VIEWS)
+        tables = {r[0] for r in self.con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
+        self.con.execute(FRANCHISE_MACRO + source_views(tables) + VIEWS)
         y0, y1 = parse_years(getattr(a, "year", None))
         self.span = "(all time)" if getattr(a, "year", None) is None else f"({a.year})"
         self.params: dict[str, Any] = {"y0": y0, "y1": y1, "limit": getattr(a, "limit", 15),
                                        "min_balls": getattr(a, "min_balls", 0) or 0}
-        self.csv = getattr(a, "csv", None)
-        self.tables = 0
+        self.blocks: list[dict[str, Any]] = []
 
     @staticmethod
     def team(code: str | None) -> str:
         code = (code or "").strip().upper()
-        return {"KXIP": "PBKS", "KOCHI": "Kochi", "DD": "DC"}.get(code, code)
+        return {"KXIP": "PBKS", "KOCHI": "KTK", "DD": "DC"}.get(code, code)
 
     def _run(self, sql_text: str, extra: dict[str, Any] | None = None, use_params: bool = True):
         if not use_params:
@@ -370,32 +430,43 @@ class Q:
         cols, data = self._run(sql_text, extra)
         return [dict(zip(cols, r)) for r in data]
 
-    def table(self, title: str, sql_text: str, use_params: bool = True) -> None:
-        cols, data = self._run(sql_text, use_params=use_params)
-        self._print(title, cols, data)
+    def table(self, title: str, sql_text: str, use_params: bool = True, extra: dict[str, Any] | None = None) -> None:
+        cols, data = self._run(sql_text, extra, use_params=use_params)
+        self.blocks.append({"type": "table", "title": title, "columns": cols, "rows": [list(r) for r in data]})
 
     def show(self, title: str, records: list[dict[str, Any]]) -> None:
         cols = list(records[0]) if records else []
-        self._print(title, cols, [tuple(r.values()) for r in records])
+        self.blocks.append({"type": "table", "title": title, "columns": cols, "rows": [list(r.values()) for r in records]})
 
-    def _print(self, title: str, cols: list[str], data: list[tuple]) -> None:
-        self.tables += 1
-        print(f"\n{title}")
+    def note(self, text: str) -> None:
+        self.blocks.append({"type": "text", "text": text})
+
+
+def render(blocks: list[dict[str, Any]], csv_path: str | None = None) -> None:
+    """Print blocks as plain-text tables (and optionally save each table as CSV)."""
+    tables = 0
+    for b in blocks:
+        if b["type"] == "text":
+            print(f"\n{b['text']}")
+            continue
+        tables += 1
+        cols, data = b["columns"], b["rows"]
+        print(f"\n{b['title']}")
         if not data:
-            print("  (no rows - check which years are ingested with: python -m backend.db.queries seasons)")
-            return
+            print("  (no rows - check which years are loaded with: python -m backend.db.queries seasons)")
+            continue
         cells = [[("-" if v is None else str(v)) for v in row] for row in data]
         widths = [max(len(c), *(len(r[i]) for r in cells)) for i, c in enumerate(cols)]
         numeric = [all(_is_num(r[i]) for r in cells) for i in range(len(cols))]
-        fmt = lambda vals: "  ".join(v.rjust(w) if n else v.ljust(w) for v, w, n in zip(vals, widths, numeric))
+        fmt = lambda vals: "  ".join(v.rjust(w) if n else v.ljust(w) for v, w, n in zip(vals, widths, numeric))  # noqa: E731
         print(fmt(cols))
         print("  ".join("-" * w for w in widths))
         for r in cells:
             print(fmt(r))
-        if self.csv:
-            out = Path(self.csv)
-            if self.tables > 1:
-                out = out.with_name(f"{out.stem}_{self.tables}{out.suffix}")
+        if csv_path:
+            out = Path(csv_path)
+            if tables > 1:
+                out = out.with_name(f"{out.stem}_{tables}{out.suffix}")
             with out.open("w", newline="", encoding="utf-8") as fh:
                 w = csv.writer(fh)
                 w.writerow(cols)
@@ -419,11 +490,7 @@ def parse_years(spec: str | None) -> tuple[int, int]:
     return (parts[0], parts[-1])
 
 
-def main(argv: list[str] | None = None) -> None:
-    try:
-        sys.stdout.reconfigure(errors="replace")        # Windows consoles: never crash on a stray character
-    except AttributeError:
-        pass
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", default=None, help=f"DuckDB file (default {store.DEFAULT_DB})")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -442,6 +509,8 @@ def main(argv: list[str] | None = None) -> None:
     cmd("seasons", seasons, "Coverage and scoring summary per IPL year", limit=100)
     cmd("top-batters", top_batters, "Most runs (Orange Cap style)", min_balls=0)
     cmd("top-bowlers", top_bowlers, "Most wickets (Purple Cap style)", min_balls=0)
+    p = cmd("players", players, "Find players by name (returns player_id)", year=False)
+    p.add_argument("name")
     p = cmd("player", player, "One player's batting and bowling by year and by phase", limit=100)
     p.add_argument("name", help="part of the name (kohli) or the player_id")
     p = cmd("phase", phase, "Best batters or bowlers in a phase", min_balls=60)
@@ -461,16 +530,40 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--search", help="only lines containing this text, e.g. six, dropped, yorker")
     p.add_argument("--inning", type=int)
     p.add_argument("--full", action="store_true", help="do not shorten long commentary lines")
-    p = cmd("sql", sql, "Run your own SQL (views: d, bat_inn, bowl_inn; tables: matches, balls, ref_*)",
+    p = cmd("sql", sql, "Run your own SQL (views: d, bat_inn, bowl_inn; tables: matches, balls, cricsheet_balls, ref_*)",
             year=False, limit=1000)
     p.add_argument("query")
+    return ap
 
-    a = ap.parse_args(argv)
+
+def run(argv: list[str], db: str | Path | None = None) -> list[dict[str, Any]]:
+    """Run a command (same arguments as the CLI) and return its output blocks. Used by the API."""
+    a = build_parser().parse_args(argv)
+    if db is not None:
+        a.db = str(db)
     q = Q(a)
     try:
         a.fn(q, a)
     finally:
         q.con.close()
+    return q.blocks
+
+
+def main(argv: list[str] | None = None) -> None:
+    try:
+        sys.stdout.reconfigure(errors="replace")        # Windows consoles: never crash on a stray character
+    except AttributeError:
+        pass
+    a = build_parser().parse_args(argv)
+    try:
+        q = Q(a)
+    except NoDatabase as exc:
+        sys.exit(str(exc))
+    try:
+        a.fn(q, a)
+    finally:
+        q.con.close()
+    render(q.blocks, a.csv)
 
 
 if __name__ == "__main__":

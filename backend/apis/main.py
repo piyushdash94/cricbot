@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.apis.demo_data import dashboard_shell, demo_scorecard
 from backend.apis.docs_catalog import docs_catalog
+from backend.apis.stats import router as stats_router
 from backend.apis.schemas import (
     AgentChatRequest,
     MatchPreviewRequest,
@@ -55,6 +56,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(stats_router)       # /api/stats/* over the DuckDB archive (backend/db)
 
 agent = CricbotAgent()
 
