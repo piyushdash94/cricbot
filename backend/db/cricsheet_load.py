@@ -21,10 +21,8 @@ import argparse
 import csv
 import json
 import logging
-import os
-import tempfile
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from . import store
 
@@ -57,8 +55,9 @@ def match_files(directory: Path) -> list[Path]:
     return sorted(p for p in directory.glob("*.json") if p.stem.isdigit())
 
 
-def load_register(path: Path = REGISTER_FILE, download: bool = True) -> dict[str, int]:
+def load_register(path: Path | None = None, download: bool = True) -> dict[str, int]:
     """Cricsheet player id -> Cricinfo player id (empty if the register is unavailable)."""
+    path = Path(path or REGISTER_FILE)        # read at call time, so tests can point it elsewhere
     if not path.exists() and download:
         try:
             import httpx
@@ -195,19 +194,7 @@ def match_row(match_id: int, payload: dict[str, Any]) -> dict[str, Any]:
 
 # ------------------------------------------------------------------ loading
 
-def _bulk_insert(con, table: str, columns: Iterable[str], rows: list[dict[str, Any]]) -> None:
-    """Insert many rows fast: write NDJSON, then one INSERT ... SELECT (executemany is slow)."""
-    if not rows:
-        return
-    columns = tuple(columns)
-    with tempfile.NamedTemporaryFile("w", suffix=".ndjson", delete=False, encoding="utf-8") as fh:
-        for r in rows:
-            fh.write(json.dumps({c: r.get(c) for c in columns}) + "\n")
-        tmp = fh.name
-    try:
-        con.execute(f"INSERT INTO {table} BY NAME SELECT * FROM read_json_auto(?, format='newline_delimited')", [tmp])
-    finally:
-        os.unlink(tmp)
+_bulk_insert = store.bulk_insert
 
 
 def load(db_path: str | Path | None = None, directory: Path | None = None, download_register: bool = True) -> dict[str, int]:

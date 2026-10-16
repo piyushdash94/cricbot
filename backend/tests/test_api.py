@@ -15,7 +15,8 @@ from backend.src import ipl_data  # noqa: E402
 
 # These contract tests describe the offline behaviour (no Cricsheet sync, ESPN unreachable).
 # Pin that state so results do not depend on the machine: an empty archive directory, an empty
-# cache, and an ESPN client that cannot connect.
+# cache, and an ESPN client that cannot connect. Fixture lists already fetched by an earlier
+# test module (the in-process lru_cache) are dropped too.
 _PATCHES = []
 
 
@@ -30,11 +31,13 @@ def setUpModule():
     ])
     for p in _PATCHES:
         p.start()
+    ipl_data._series_matches.cache_clear()
 
 
 def tearDownModule():
     while _PATCHES:
         _PATCHES.pop().stop()
+    ipl_data._series_matches.cache_clear()
 
 
 class ApiTests(unittest.TestCase):

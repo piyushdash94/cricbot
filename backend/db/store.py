@@ -23,7 +23,9 @@ Views
 
 from __future__ import annotations
 
+import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -139,14 +141,32 @@ def connect(path: str | Path | None = None, read_only: bool = False) -> duckdb.D
 
 
 def _insert(con: duckdb.DuckDBPyConnection, table: str, columns: Iterable[str], rows: list[dict[str, Any]]) -> None:
+    """Insert many rows in one statement: write NDJSON, then INSERT ... SELECT from it.
+
+    executemany runs one statement per row, which made a single match take ~2 s on Linux
+    and ~17 s on a Windows hard drive. Column types come from the table itself, so nothing
+    is inferred from the data (a commentary line is never read back as a date).
+    """
     columns = tuple(columns)
     if not rows:
         return
-    placeholders = ", ".join("?" for _ in columns)
-    con.executemany(
-        f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})",
-        [tuple(r.get(c) for c in columns) for r in rows],
-    )
+    types = dict(con.execute(
+        "SELECT column_name, data_type FROM duckdb_columns() WHERE table_name = ? AND schema_name = 'main'",
+        [table]).fetchall())
+    spec = ", ".join(f"'{c}': '{types[c]}'" for c in columns)
+    with tempfile.NamedTemporaryFile("w", suffix=".ndjson", delete=False, encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps({c: r.get(c) for c in columns}, default=str) + "\n")
+        tmp = fh.name
+    try:
+        con.execute(
+            f"INSERT INTO {table} ({', '.join(columns)}) SELECT {', '.join(columns)} "
+            f"FROM read_json(?, format = 'newline_delimited', columns = {{{spec}}})", [tmp])
+    finally:
+        os.unlink(tmp)
+
+
+bulk_insert = _insert
 
 
 def upsert_matches(con: duckdb.DuckDBPyConnection, rows: list[dict[str, Any]]) -> None:
