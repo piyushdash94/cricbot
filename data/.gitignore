@@ -1,0 +1,3 @@
+# Local DuckDB archive built by `python -m backend.db.ingest` - never committed.
+*
+!.gitignore
