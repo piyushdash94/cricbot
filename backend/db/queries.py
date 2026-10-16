@@ -196,10 +196,11 @@ def player(q: "Q", a: argparse.Namespace) -> None:
     if not did["bat"] and not did["bowl"]:
         q.note(f"{name} has no innings {q.span}.")
         return
-    if did["bat"]:
-        _player_batting(q, name)
-    if did["bowl"]:
-        _player_bowling(q, name)
+    # Main role first: a bowler's profile opens with bowling.
+    sections = [(did["bat"], _player_batting), (did["bowl"], _player_bowling)]
+    for count, show in sorted(sections, key=lambda item: -item[0]):
+        if count:
+            show(q, name)
 
 
 def _player_batting(q: "Q", name: str) -> None:

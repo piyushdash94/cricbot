@@ -29,6 +29,7 @@ test("server-renders the Cricbot chat-first archive and agent workspace", async 
   assert.match(html, /API patterns, ownership, state, and provenance/);
   assert.match(html, /Agent graph/);
   assert.match(html, /Toggle agent trace/);
+  assert.match(html, /Open IPL stats/);
   assert.match(html, /Understand request/);
   assert.match(html, /Load match data/);
   assert.match(html, /LLM synthesis/);
