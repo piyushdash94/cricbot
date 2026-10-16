@@ -5,15 +5,20 @@
     con.sql("SELECT * FROM batting_card WHERE match_id = 1473511").show()
 
 Tables
-  matches      one row per match (from the series fixture list)
-  balls        one row per delivery, incl. wides/no-balls (ESPN play-by-play)
+  matches          one row per match (ESPN fixture list, gaps filled from Cricsheet)
+  cricsheet_balls  one row per delivery from Cricsheet (backend.db.cricsheet_load)
+  balls            one row per delivery from ESPN play-by-play, with commentary text
+                   (backend.db.ingest, optional)
   ref_innings / ref_batting / ref_bowling
-               the official Cricinfo scorecard, kept for dismissal text and
-               for checking `balls` (see backend.db.evaluate)
-  ingest_log   what happened the last time each match was ingested
+                   the official Cricinfo scorecard, kept for dismissal text and as the
+                   answer key in backend.db.evaluate (filled by the ESPN ingest)
+  players          display name per player_id (Cricinfo ids, shared by both sources)
+  ingest_log       what happened the last time each match was ESPN-ingested
 
-Views (derived from `balls` only)
-  innings_card, batting_card, bowling_card
+Views
+  deliveries       every delivery, one source per match: Cricsheet when loaded, else ESPN
+  innings_card, batting_card, bowling_card            scorecards rebuilt from `balls` (ESPN)
+  cs_innings_card, cs_batting_card, cs_bowling_card   the same, rebuilt from `cricsheet_balls`
 """
 
 from __future__ import annotations
@@ -62,30 +67,54 @@ CREATE TABLE IF NOT EXISTS ingest_log (
     error VARCHAR, ingested_at TIMESTAMP DEFAULT current_timestamp
 );
 
-CREATE OR REPLACE VIEW innings_card AS
+CREATE TABLE IF NOT EXISTS cricsheet_balls (
+    match_id BIGINT, inning INTEGER, sequence BIGINT, over_number INTEGER, ball_in_over INTEGER, over_label VARCHAR,
+    batting_team VARCHAR, batter_id BIGINT, batter VARCHAR, non_striker VARCHAR, bowler_id BIGINT, bowler VARCHAR,
+    runs_total INTEGER, score_value INTEGER, runs_bat INTEGER, extras INTEGER, wide_runs INTEGER, noball_runs INTEGER,
+    bye_runs INTEGER, legbye_runs INTEGER, penalty_runs INTEGER,
+    is_legal BOOLEAN, is_wide BOOLEAN, is_noball BOOLEAN, is_four BOOLEAN, is_six BOOLEAN,
+    is_wicket BOOLEAN, bowler_wicket BOOLEAN, dismissal_type VARCHAR, player_out_id BIGINT, player_out VARCHAR,
+    short_text VARCHAR, commentary VARCHAR,
+    PRIMARY KEY (match_id, inning, sequence)
+);
+CREATE TABLE IF NOT EXISTS players (
+    player_id BIGINT, name VARCHAR, source VARCHAR, PRIMARY KEY (player_id, source)
+);
+
+CREATE OR REPLACE VIEW deliveries AS
+SELECT 'cricsheet' AS source, * FROM cricsheet_balls
+UNION ALL BY NAME
+SELECT 'espn' AS source, * FROM balls WHERE match_id NOT IN (SELECT DISTINCT match_id FROM cricsheet_balls);
+"""
+
+# The same three scorecard views per source; Cricsheet also records penalty runs (not the bowler's).
+CARD_VIEWS = """
+CREATE OR REPLACE VIEW {prefix}innings_card AS
 SELECT match_id, inning, any_value(batting_team) AS team,
        sum(runs_total) AS runs, count(*) FILTER (WHERE is_wicket) AS wickets,
        count(*) FILTER (WHERE is_legal) AS balls,
        sum(extras) AS extras, sum(wide_runs) AS wides, sum(noball_runs) AS noballs,
        sum(bye_runs) AS byes, sum(legbye_runs) AS legbyes
-FROM balls GROUP BY match_id, inning;
+FROM {table} GROUP BY match_id, inning;
 
-CREATE OR REPLACE VIEW batting_card AS
+CREATE OR REPLACE VIEW {prefix}batting_card AS
 SELECT match_id, inning, batter_id AS player_id, any_value(batter) AS player,
        sum(runs_bat) AS runs, count(*) FILTER (WHERE NOT is_wide) AS balls,
        count(*) FILTER (WHERE is_four) AS fours, count(*) FILTER (WHERE is_six) AS sixes,
        min(sequence) AS first_ball
-FROM balls GROUP BY match_id, inning, batter_id;
+FROM {table} GROUP BY match_id, inning, batter_id;
 
-CREATE OR REPLACE VIEW bowling_card AS
+CREATE OR REPLACE VIEW {prefix}bowling_card AS
 SELECT match_id, inning, bowler_id AS player_id, any_value(bowler) AS player,
        count(*) FILTER (WHERE is_legal) AS balls,
-       sum(runs_total - bye_runs - legbye_runs) AS conceded,
+       sum(runs_total - bye_runs - legbye_runs{penalty}) AS conceded,
        count(*) FILTER (WHERE bowler_wicket) AS wickets,
        count(*) FILTER (WHERE is_wide) AS wides, count(*) FILTER (WHERE is_noball) AS noballs,
        count(*) FILTER (WHERE is_legal AND runs_total = 0) AS dots
-FROM balls GROUP BY match_id, inning, bowler_id;
+FROM {table} GROUP BY match_id, inning, bowler_id;
 """
+SCHEMA += "".join(CARD_VIEWS.format(prefix=prefix, table=table, penalty=penalty)
+                  for prefix, table, penalty in (("", "balls", ""), ("cs_", "cricsheet_balls", " - penalty_runs")))
 
 REF_COLUMNS = {
     "ref_innings": ("match_id", "inning", "team", "runs", "wickets", "balls", "extras", "byes", "legbyes",

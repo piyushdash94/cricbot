@@ -11,6 +11,30 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from backend.apis.demo_data import demo_scorecard  # noqa: E402
 from backend.apis.main import agent, app  # noqa: E402
+from backend.src import ipl_data  # noqa: E402
+
+# These contract tests describe the offline behaviour (no Cricsheet sync, ESPN unreachable).
+# Pin that state so results do not depend on the machine: an empty archive directory, an empty
+# cache, and an ESPN client that cannot connect.
+_PATCHES = []
+
+
+def setUpModule():
+    import tempfile
+
+    empty = tempfile.mkdtemp(prefix="cricbot-test-")
+    _PATCHES.extend([
+        patch.dict(os.environ, {"CRICSHEET_DIR": os.path.join(empty, "cricsheet"),
+                                "CRICBOT_CACHE_DIR": os.path.join(empty, "cache")}),
+        patch.object(ipl_data, "_client", side_effect=ConnectionError("offline (test)")),
+    ])
+    for p in _PATCHES:
+        p.start()
+
+
+def tearDownModule():
+    while _PATCHES:
+        _PATCHES.pop().stop()
 
 
 class ApiTests(unittest.TestCase):

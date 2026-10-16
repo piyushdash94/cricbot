@@ -77,6 +77,16 @@ For a synced match, everything comes from one set of deliveries:
 
 Cricinfo responses are cached on disk per match (`backend/data/cache`, override with `CRICBOT_CACHE_DIR`) and requests are throttled, because `cricdata` scrapes without a contract. Matches not yet in Cricsheet fall back to ESPN play-by-play, then Cricinfo commentary pages, then over summaries; coverage is always labelled.
 
+### Stats archive (for the Stats view)
+
+The Stats view (the **∑** button, or **Stats** on mobile) and `/api/stats/*` read a local DuckDB file built from the same Cricsheet data:
+
+```bash
+python -m backend.db.cricsheet_load --sync     # ~20 s: downloads Cricsheet and loads every IPL delivery
+```
+
+It covers season and all-time leaders, records, powerplay / middle / death splits, player profiles and head to head. Optionally, `python -m backend.db.ingest` adds ESPN commentary and the official scorecard for cross-checking. Details, schema and accuracy checks are in [`backend/db/README.md`](backend/db/README.md).
+
 ### Frontend
 
 ```bash

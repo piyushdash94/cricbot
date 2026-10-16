@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import { StatsPanel } from "./stats";
 
 // ---------------------------------------------------------------- contracts
 
@@ -196,7 +197,9 @@ export default function Home() {
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [toast, setToast] = useState("");
-  const [mobileView, setMobileView] = useState<"chat" | "matches" | "match">("chat");
+  const [mobileView, setMobileView] = useState<"chat" | "matches" | "match" | "stats">("chat");
+  // Stats opens the workspace on demand (like a match does); it can sit over an open match.
+  const [showStats, setShowStats] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -238,6 +241,7 @@ export default function Home() {
     setDetailLoading(true);
     setMatchTab(tab);
     setInningFilter(0);
+    setShowStats(false);
     setMobileView("match");
     if (pushHistory) setMatchUrl(match);
     try {
@@ -434,11 +438,12 @@ export default function Home() {
     : [`Tell me about the ${season} final`, `Show all RCB matches in ${season}`, "Where did the 2024 final turn?"];
 
   return (
-    <div className={`app ${dark ? "dark" : "light"} view-${mobileView}${selected ? " has-match" : ""}`}>
+    <div className={`app ${dark ? "dark" : "light"} view-${mobileView}${selected ? " has-match" : ""}${showStats ? " stats-open" : ""}`}>
       <aside className="rail" aria-label="IPL archive">
         <div className="rail-head">
           <button className="brand" onClick={() => setMobileView("chat")}><span className="brand-mark" /><span>CRIC<span>BOT</span></span></button>
           <div className="rail-actions">
+            <button className={`icon-button${showStats ? " active" : ""}`} onClick={() => { setShowStats(true); setMobileView("stats"); }} aria-label="Open IPL stats" title="IPL stats">∑</button>
             <button className="icon-button" onClick={() => setDocsOpen(true)} aria-label="Open documentation">≡</button>
             <button className="icon-button" onClick={() => setDark((value) => !value)} aria-label="Toggle color theme">{dark ? "☼" : "☾"}</button>
           </div>
@@ -494,8 +499,11 @@ export default function Home() {
       </main>
 
       <section className="workspace" aria-label="Match workspace">
-        {!selected && <div className="workspace-empty"><span>◉</span><h3>No match open</h3><p>Pick one from the archive, or ask Pandit about any IPL match.</p></div>}
-        {selected && <>
+        {showStats && <StatsPanel season={season} seasons={seasons} matchOpen={Boolean(selected)}
+          onBackToMatch={() => { setShowStats(false); setMobileView("match"); }}
+          onClose={() => { setShowStats(false); setMobileView("chat"); }} />}
+        {!selected && !showStats && <div className="workspace-empty"><span>◉</span><h3>No match open</h3><p>Pick one from the archive, or ask Pandit about any IPL match.</p></div>}
+        {selected && !showStats && <>
           <div className="match-hero">
             <div className="hero-actions"><button className="back-link" onClick={closeMatch}>← Close</button><button className="share-button" onClick={shareMatch}>Copy summary + link</button></div>
             <div className="match-meta"><span>{selected.series_name}{selected.label && selected.label !== "Match" ? ` · ${selected.label}` : ""}</span><span>{formatDate(selected.date)}</span><span>{selected.venue}</span></div>
@@ -515,7 +523,7 @@ export default function Home() {
       </section>
 
       <nav className="mobile-nav" aria-label="Sections">
-        {(["matches", "chat", "match"] as const).map((view) => <button key={view} className={mobileView === view ? "active" : ""} onClick={() => setMobileView(view)} disabled={view === "match" && !selected}>{view === "matches" ? "Matches" : view === "chat" ? "Pandit" : "Match"}</button>)}
+        {(["matches", "chat", "stats", "match"] as const).map((view) => <button key={view} className={mobileView === view ? "active" : ""} onClick={() => { if (view === "stats" || view === "match") setShowStats(view === "stats"); setMobileView(view); }} disabled={view === "match" && !selected}>{{ matches: "Matches", chat: "Pandit", stats: "Stats", match: "Match" }[view]}</button>)}
       </nav>
       <DocsDrawer open={docsOpen} docs={docs} onClose={() => setDocsOpen(false)} />
       <TraceDrawer open={traceOpen} graph={graph} trace={trace} loading={chatLoading} onClose={() => setTraceOpen(false)} />

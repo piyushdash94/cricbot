@@ -1,12 +1,13 @@
 """Check the ball-by-ball data against the official scorecard.
 
-    python -m backend.db.evaluate                 # summary for everything stored
+    python -m backend.db.evaluate                       # ESPN balls vs the official card
+    python -m backend.db.evaluate --source cricsheet    # Cricsheet balls vs the official card
     python -m backend.db.evaluate --season 2025 --show 10
 
-The scorecard is rebuilt from `balls` (views innings_card / batting_card /
-bowling_card) and compared field by field with ref_* (the Cricinfo card).
-Two independent sources agreeing is strong evidence the balls are complete
-and the parsing rules (wides, no-balls, byes, bowler wickets) are right.
+The scorecard is rebuilt from one ball source (views innings_card / batting_card /
+bowling_card for ESPN, cs_* for Cricsheet) and compared field by field with ref_*
+(the Cricinfo card, filled by the ESPN ingest). Independent sources agreeing is
+strong evidence the balls are complete and the scoring rules are right.
 
 Levels checked
   coverage   ingest status per match ('partial' = fewer items than the API's count)
@@ -83,7 +84,21 @@ def _rows(con: duckdb.DuckDBPyConnection, sql: str, season: str | None) -> list[
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
-def evaluate(db_path: str | None = None, season: str | None = None) -> dict[str, Any]:
+SOURCES = {"espn": ("", "balls"), "cricsheet": ("cs_", "cricsheet_balls")}
+
+
+def _for_source(sql: str, source: str) -> str:
+    prefix, table = SOURCES[source]
+    for view in ("innings_card", "batting_card", "bowling_card"):
+        sql = sql.replace(f"JOIN {view} ", f"JOIN {prefix}{view} ")
+    sql = sql.replace("FROM balls GROUP BY ALL", f"FROM {table} GROUP BY ALL")
+    if source != "espn":                                      # only matches that source actually has
+        sql = sql.replace("l.status IN ('ok', 'partial')",
+                          f"l.status IN ('ok', 'partial') AND r.match_id IN (SELECT match_id FROM {table})")
+    return sql
+
+
+def evaluate(db_path: str | None = None, season: str | None = None, source: str = "espn") -> dict[str, Any]:
     con = store.connect(db_path, read_only=True)
     coverage = con.execute(
         """SELECT count(*) AS listed,
@@ -94,9 +109,9 @@ def evaluate(db_path: str | None = None, season: str | None = None) -> dict[str,
                   count(*) FILTER (WHERE l.status IS NULL) AS not_ingested
            FROM matches m LEFT JOIN ingest_log l USING (match_id) """ + FILTER, [season, season]
     ).fetchone()
-    levels = {name: _rows(con, sql, season) for name, sql in
+    levels = {name: _rows(con, _for_source(sql, source), season) for name, sql in
               (("innings", INNINGS_SQL), ("batting", BATTING_SQL), ("bowling", BOWLING_SQL))}
-    irregular = {(m, i) for m, i in con.execute(IRREGULAR_OVERS_SQL).fetchall()}
+    irregular = {(m, i) for m, i in con.execute(_for_source(IRREGULAR_OVERS_SQL, source)).fetchall()}
     partial_ids = {r[0] for r in con.execute("SELECT match_id FROM ingest_log WHERE status = 'partial'").fetchall()}
     con.close()
 
@@ -142,10 +157,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", default=None)
     ap.add_argument("--season", default=None)
+    ap.add_argument("--source", choices=sorted(SOURCES), default="espn", help="which ball source to check")
     ap.add_argument("--show", type=int, default=5, help="mismatch rows to print per level")
     ap.add_argument("--json", default=None, help="write the full report (incl. all mismatches) here")
     args = ap.parse_args()
-    report = evaluate(args.db, args.season)
+    report = evaluate(args.db, args.season, args.source)
+    print('source:', args.source)
     print("coverage:", report["coverage"])
     if report["coverage"]["partial"]:
         print(f"partial  {report['partial_reconciled']}/{report['coverage']['partial']} reconcile with the "

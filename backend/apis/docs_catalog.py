@@ -18,6 +18,7 @@ def docs_catalog():
         "sources": [
             {"name": "cricdata / ESPNcricinfo", "use": "IPL schedules, results, match info, scorecards, overs, partnerships and commentary", "mode": "live upstream, cached in process"},
             {"name": "Cricsheet", "use": "Every delivery of every IPL match (structured, no commentary prose); ODC-BY licensed", "mode": "offline after `python -m backend.src.cricsheet sync`"},
+            {"name": "DuckDB stats archive", "use": "Cross-season stats (leaders, players, phases, records, head to head) over Cricsheet deliveries, with optional ESPN commentary", "mode": "local file built by `python -m backend.db.cricsheet_load --sync`"},
             {"name": "ESPN play-by-play", "use": "Full deliveries with commentary text via cricdata.match_ball_by_ball", "mode": "best effort, paginated"},
             {"name": "Local demo payload", "use": "Stable scorecard and sample delivery timeline when the provider is unavailable", "mode": "automatic fallback, explicitly labelled"},
             {"name": "Groq / OpenRouter LLMs", "use": "Summarise grounded facts into conversational answers; Groq first, OpenRouter as fallback, local Gemma last", "mode": "hosted chat/completions; keys in backend/.env; every number is validated against the facts"},
@@ -31,6 +32,12 @@ def docs_catalog():
             {"method": "POST", "path": "/api/agent/chat/stream", "use": "Pandit chat plus live graph trace", "request": "{ message, history, ui_context }", "response": "NDJSON trace events, then one result event"},
             {"method": "GET", "path": "/api/agent/graph", "use": "Graph metadata for the visual debugger", "response": "{ nodes, edges, state_fields }"},
             {"method": "GET", "path": "/api/docs/catalog", "use": "This documentation", "response": "Machine-readable platform catalog"},
+            {"method": "GET", "path": "/api/stats/status", "use": "Whether the DuckDB stats archive exists, its sources and years", "response": "{ available, sources: { cricsheet, espn }, years }"},
+            {"method": "GET", "path": "/api/stats/batting | /bowling", "use": "Season or all-time run and wicket leaders", "request": "year (2016 or 2016-2018), limit, min_balls", "response": "{ blocks: [{ type, title, columns, rows }] }"},
+            {"method": "GET", "path": "/api/stats/records", "use": "Highest totals and scores, best figures, fastest fifties, most sixes", "request": "year, limit", "response": "{ blocks }"},
+            {"method": "GET", "path": "/api/stats/phase", "use": "Best batters or bowlers in the powerplay, middle or death overs", "request": "phase, role, year, min_balls, limit", "response": "{ blocks }"},
+            {"method": "GET", "path": "/api/stats/players?q= | /players/{player_id}", "use": "Find a player; season-by-season and phase splits", "request": "q / player_id, year", "response": "{ blocks }"},
+            {"method": "GET", "path": "/api/stats/h2h", "use": "Head-to-head results between two teams", "request": "team1, team2, year", "response": "{ blocks }"},
         ],
         "tools": [
             {"name": "entity resolver", "owner": "extract_entities", "use": "Resolve team typos, players, years, match stages, venues, conversational carry-over, and list intent"},
