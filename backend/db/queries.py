@@ -46,6 +46,17 @@ from . import store
 FRANCHISE_MACRO = """
 CREATE OR REPLACE TEMP MACRO franchise(t) AS
     CASE t WHEN 'KXIP' THEN 'PBKS' WHEN 'DD' THEN 'DC' WHEN 'Kochi' THEN 'KTK' ELSE t END;
+-- One name per ground, whatever it was called that season (Kotla -> Arun Jaitley Stadium, ...).
+CREATE OR REPLACE TEMP MACRO ground(v) AS
+    CASE split_part(v, ',', 1)
+        WHEN 'Feroz Shah Kotla' THEN 'Arun Jaitley Stadium'
+        WHEN 'Sardar Patel Stadium' THEN 'Narendra Modi Stadium'
+        WHEN 'Punjab Cricket Association Stadium' THEN 'Punjab Cricket Association IS Bindra Stadium'
+        WHEN 'Sheikh Zayed Stadium' THEN 'Zayed Cricket Stadium'
+        WHEN 'Subrata Roy Sahara Stadium' THEN 'Maharashtra Cricket Association Stadium'
+        WHEN 'Andhra Cricket Association-Visakhapatnam District Cricket Association Stadium'
+            THEN 'Dr. Y.S. Rajasekhara Reddy ACA-VDCA Cricket Stadium'
+        ELSE split_part(v, ',', 1) END;
 """
 
 
@@ -69,7 +80,9 @@ SELECT player_id, coalesce(max(espn), max(cs)) AS name FROM (
 
 CREATE OR REPLACE TEMP VIEW d AS
 SELECT s.* REPLACE (coalesce(nb.name, s.batter) AS batter, coalesce(nw.name, s.bowler) AS bowler,
-                    coalesce(no.name, s.player_out) AS player_out),
+                    coalesce(no.name, s.player_out) AS player_out, franchise(s.batting_team) AS batting_team),
+       CASE WHEN franchise(m.team1) = franchise(s.batting_team) THEN franchise(m.team2)
+            ELSE franchise(m.team1) END AS bowling_team,
        s.runs_total - s.bye_runs - s.legbye_runs - coalesce(s.penalty_runs, 0) AS bowler_runs,
        year(m.start_date) AS year, m.start_date, m.venue, m.title AS match_title,
        CASE WHEN s.over_number <= 6 THEN 'powerplay' WHEN s.over_number <= 15 THEN 'middle' ELSE 'death' END AS phase
@@ -106,6 +119,7 @@ FROM faced f FULL OUTER JOIN outs o USING (match_id, inning, player_id);
 
 CREATE OR REPLACE TEMP VIEW bowl_inn AS
 SELECT match_id, inning, year, bowler_id AS player_id, any_value(bowler) AS player,
+       any_value(bowling_team) AS team,
        count(*) FILTER (WHERE is_legal) AS balls,
        sum(bowler_runs) AS conceded,
        count(*) FILTER (WHERE bowler_wicket) AS wickets
@@ -162,34 +176,80 @@ def seasons(q: "Q", a: argparse.Namespace) -> None:
         GROUP BY l.year, l.listed ORDER BY l.year""")
 
 
+BAT_SORTS = {"runs": ("Top run scorers", 'runs DESC, sr DESC'),
+             "sr": ("Highest strike rate", 'sr DESC NULLS LAST, runs DESC'),
+             "avg": ("Highest batting average", 'avg DESC NULLS LAST, runs DESC'),
+             "sixes": ("Most sixes", '"6s" DESC, runs DESC'),
+             "fours": ("Most fours", '"4s" DESC, runs DESC'),
+             "fifties": ("Most fifties", '"50s" DESC, runs DESC'),
+             "hundreds": ("Most hundreds", '"100s" DESC, runs DESC'),
+             "hs": ("Highest score", 'hs DESC, runs DESC')}
+BOWL_SORTS = {"wkts": ("Top wicket takers", 'wkts DESC, econ ASC'),
+              "econ": ("Best economy", 'econ ASC NULLS LAST, wkts DESC'),
+              "avg": ("Best bowling average", 'avg ASC NULLS LAST, wkts DESC'),
+              "sr": ("Best bowling strike rate", 'sr ASC NULLS LAST, wkts DESC'),
+              "4w": ("Most four-wicket hauls", '"4w+" DESC, wkts DESC')}
+RATE_SORTS = {"sr", "avg", "econ"}
+
+
+def _leaderboard_filters(q: "Q", a: argparse.Namespace, rate: bool, season_min: int) -> str:
+    """Team filter, and a minimum-balls floor for rate stats so one short innings cannot top them."""
+    q.params["team"] = q.team(getattr(a, "team", None))
+    if rate and not a.min_balls:
+        q.params["min_balls"] = season_min if getattr(a, "year", None) else season_min * 5
+    parts = [q.span]
+    if q.params["team"]:
+        parts.append(f"for {q.params['team']}")
+    if q.params["min_balls"]:
+        parts.append(f"(min {q.params['min_balls']} balls)")
+    return " ".join(parts)
+
+
 def top_batters(q: "Q", a: argparse.Namespace) -> None:
-    q.table(f"Top run scorers {q.span}", f"""
+    label, order = BAT_SORTS[a.sort]
+    scope = _leaderboard_filters(q, a, a.sort in RATE_SORTS, 100)
+    q.table(f"{label} {scope}", f"""
         SELECT player, {BATTING_AGG}
-        FROM bat_inn WHERE {YEARS}
+        FROM bat_inn WHERE {YEARS} AND ($team = '' OR team = $team)
         GROUP BY player_id, player HAVING sum(balls) >= $min_balls
-        ORDER BY runs DESC, sr DESC LIMIT $limit""")
+        ORDER BY {order} LIMIT $limit""")
 
 
 def top_bowlers(q: "Q", a: argparse.Namespace) -> None:
-    q.table(f"Top wicket takers {q.span}", f"""
+    label, order = BOWL_SORTS[a.sort]
+    scope = _leaderboard_filters(q, a, a.sort in RATE_SORTS, 120)
+    q.table(f"{label} {scope}", f"""
         SELECT player, {BOWLING_AGG}
-        FROM bowl_inn WHERE {YEARS}
+        FROM bowl_inn WHERE {YEARS} AND ($team = '' OR team = $team)
         GROUP BY player_id, player HAVING sum(balls) >= $min_balls
-        ORDER BY wkts DESC, econ ASC LIMIT $limit""")
+        ORDER BY {order} LIMIT $limit""")
 
 
-def player(q: "Q", a: argparse.Namespace) -> None:
-    found = q.rows(PLAYER_SEARCH, name=a.name)
+def _resolve_player(q: "Q", name: str) -> tuple[int, str] | None:
+    """A unique player for a name or id; otherwise a note or a table of candidates, and None."""
+    found = q.rows(PLAYER_SEARCH, name=str(name))
+    tokens = str(name).split()
+    if not found and len(tokens) >= 2:
+        # Cricsheet spells first names as initials: "Jofra Archer" is "JC Archer".
+        found = [r for r in q.rows(PLAYER_SEARCH, name=" ".join(tokens[1:]))
+                 if r["player"][:1].casefold() == tokens[0][:1].casefold()]
     if not found:
-        q.note(f"No player matching '{a.name}'.")
-        return
-    exact = [r for r in found if r["player"].casefold() == a.name.casefold() or str(r["player_id"]) == a.name]
+        q.note(f"No player matching '{name}'.")
+        return None
+    exact = [r for r in found if r["player"].casefold() == str(name).casefold() or str(r["player_id"]) == str(name)]
     if exact:
         found = exact
     elif len(found) > 1:
-        q.show("Several players match - rerun with the player_id or the full name in quotes", found)
+        q.show(f"Several players match '{name}' - use the player_id or the full name", found)
+        return None
+    return found[0]["player_id"], found[0]["player"]
+
+
+def player(q: "Q", a: argparse.Namespace) -> None:
+    resolved = _resolve_player(q, a.name)
+    if not resolved:
         return
-    pid, name = found[0]["player_id"], found[0]["player"]
+    pid, name = resolved
     q.params["pid"] = pid
     did = q.rows(f"""SELECT (SELECT count(*) FROM bat_inn WHERE player_id = $pid AND {YEARS}) AS bat,
                             (SELECT count(*) FROM bowl_inn WHERE player_id = $pid AND {YEARS}) AS bowl""")[0]
@@ -201,6 +261,24 @@ def player(q: "Q", a: argparse.Namespace) -> None:
     for count, show in sorted(sections, key=lambda item: -item[0]):
         if count:
             show(q, name)
+
+
+def matchup(q: "Q", a: argparse.Namespace) -> None:
+    """Every ball a batter faced from one bowler."""
+    batter, bowler = _resolve_player(q, a.batter), _resolve_player(q, a.bowler)
+    if not batter or not bowler:
+        return
+    q.params.update(bat=batter[0], bowl=bowler[0])
+    q.table(f"{batter[1]} v {bowler[1]} {q.span} (balls exclude wides; outs = dismissed by this bowler)", f"""
+        SELECT coalesce(CAST(year AS VARCHAR), 'Total') AS year,
+               count(*) FILTER (WHERE NOT is_wide) AS balls, sum(runs_bat) AS runs,
+               count(*) FILTER (WHERE bowler_wicket AND player_out_id = $bat) AS outs,
+               round(100.0 * sum(runs_bat) / nullif(count(*) FILTER (WHERE NOT is_wide), 0), 2) AS sr,
+               round(100.0 * count(*) FILTER (WHERE NOT is_wide AND runs_bat = 0)
+                     / nullif(count(*) FILTER (WHERE NOT is_wide), 0), 1) AS dot_pct,
+               count(*) FILTER (WHERE is_four) AS "4s", count(*) FILTER (WHERE is_six) AS "6s"
+        FROM d WHERE batter_id = $bat AND bowler_id = $bowl AND {YEARS}
+        GROUP BY ROLLUP (year) ORDER BY year NULLS LAST""")
 
 
 def _player_batting(q: "Q", name: str) -> None:
@@ -336,6 +414,73 @@ def records(q: "Q", a: argparse.Namespace) -> None:
     q.table(f"Most sixes in an innings {q.span}", f"""
         SELECT player, team, sixes AS "6s", runs || CASE WHEN is_out THEN '' ELSE '*' END AS score, balls, year, match_id
         FROM bat_inn WHERE {YEARS} ORDER BY sixes DESC, runs DESC LIMIT $limit""")
+
+
+def venues(q: "Q", a: argparse.Namespace) -> None:
+    q.params["venue"] = a.name or ""
+    q.table(f"Grounds {q.span}" + (f" matching '{a.name}'" if a.name else " by matches played"), f"""
+        WITH inn AS (
+            SELECT match_id, inning, any_value(batting_team) AS team, sum(runs_total) AS runs,
+                   count(*) FILTER (WHERE is_legal) AS balls
+            FROM d WHERE {YEARS} GROUP BY match_id, inning
+        )
+        SELECT ground(m.venue) AS ground, count(*) AS matches,
+               round(avg(i1.runs), 1) AS avg_1st_inns,
+               count(*) FILTER (WHERE franchise(m.winner) = i1.team) AS bat_first_won,
+               count(*) FILTER (WHERE franchise(m.winner) = i2.team) AS chasing_won,
+               max(greatest(i1.runs, coalesce(i2.runs, 0))) AS highest_total,
+               round(6.0 * sum(i1.runs + coalesce(i2.runs, 0)) / nullif(sum(i1.balls + coalesce(i2.balls, 0)), 0), 2) AS run_rate,
+               min(year(m.start_date)) AS first, max(year(m.start_date)) AS last
+        FROM matches m
+        JOIN inn i1 ON i1.match_id = m.match_id AND i1.inning = 1
+        LEFT JOIN inn i2 ON i2.match_id = m.match_id AND i2.inning = 2
+        GROUP BY ground(m.venue)
+        HAVING $venue = '' OR ground(m.venue) ILIKE '%' || $venue || '%' OR bool_or(m.venue ILIKE '%' || $venue || '%')
+        ORDER BY matches DESC LIMIT $limit""")
+
+
+def champions(q: "Q", a: argparse.Namespace) -> None:
+    q.table(f"IPL finals {q.span}", f"""
+        SELECT year(start_date) AS year, franchise(winner) AS champion,
+               CASE WHEN franchise(winner) = franchise(team1) THEN franchise(team2) ELSE franchise(team1) END AS runner_up,
+               status_text AS result, ground(venue) AS ground, match_id
+        FROM matches WHERE title = 'Final' AND year(start_date) BETWEEN $y0 AND $y1 ORDER BY year""")
+    q.table(f"Titles by team {q.span}", f"""
+        SELECT franchise(winner) AS team, count(*) AS titles, string_agg(CAST(year(start_date) AS VARCHAR), ', ' ORDER BY start_date) AS years
+        FROM matches WHERE title = 'Final' AND year(start_date) BETWEEN $y0 AND $y1
+        GROUP BY 1 ORDER BY titles DESC, team LIMIT $limit""")
+
+
+PLAYOFF = "(title ILIKE '%final%' OR title ILIKE '%qualif%' OR title ILIKE '%eliminator%')"
+
+
+def team(q: "Q", a: argparse.Namespace) -> None:
+    code = q.team(a.code)
+    q.params["t"] = code
+    q.table(f"{code} season by season {q.span} (from the match list; no result = abandoned or tied without a winner)", f"""
+        WITH g AS (
+            SELECT year(start_date) AS year, franchise(winner) AS winner, title
+            FROM matches
+            WHERE $t IN (franchise(team1), franchise(team2)) AND year(start_date) BETWEEN $y0 AND $y1
+        ), s AS (
+            SELECT year, count(*) AS played, count(*) FILTER (WHERE winner = $t) AS won,
+                   count(*) FILTER (WHERE winner IS NOT NULL AND winner <> '' AND winner <> $t) AS lost,
+                   count(*) FILTER (WHERE winner IS NULL OR winner = '') AS no_result,
+                   CASE WHEN bool_or(title = 'Final' AND winner = $t) THEN 'Champions'
+                        WHEN bool_or(title = 'Final') THEN 'Runner-up'
+                        WHEN bool_or({PLAYOFF}) THEN 'Playoffs'
+                        ELSE 'League stage' END AS finish
+            FROM g GROUP BY year
+        )
+        SELECT CAST(year AS VARCHAR) AS year, played, won, lost, no_result,
+               round(100.0 * won / nullif(won + lost, 0), 1) AS win_pct, finish
+        FROM s
+        UNION ALL
+        SELECT 'Total', sum(played), sum(won), sum(lost), sum(no_result),
+               round(100.0 * sum(won) / nullif(sum(won + lost), 0), 1),
+               count(*) FILTER (WHERE finish = 'Champions') || ' titles'
+        FROM s
+        ORDER BY year""")
 
 
 def h2h(q: "Q", a: argparse.Namespace) -> None:
@@ -508,12 +653,24 @@ def build_parser() -> argparse.ArgumentParser:
         return p
 
     cmd("seasons", seasons, "Coverage and scoring summary per IPL year", limit=100)
-    cmd("top-batters", top_batters, "Most runs (Orange Cap style)", min_balls=0)
-    cmd("top-bowlers", top_bowlers, "Most wickets (Purple Cap style)", min_balls=0)
+    p = cmd("top-batters", top_batters, "Batting leaderboard: most runs (Orange Cap) or any --sort", min_balls=0)
+    p.add_argument("--sort", choices=list(BAT_SORTS), default="runs")
+    p.add_argument("--team", help="only innings for this team, e.g. CSK")
+    p = cmd("top-bowlers", top_bowlers, "Bowling leaderboard: most wickets (Purple Cap) or any --sort", min_balls=0)
+    p.add_argument("--sort", choices=list(BOWL_SORTS), default="wkts")
+    p.add_argument("--team", help="only spells for this team, e.g. MI")
     p = cmd("players", players, "Find players by name (returns player_id)", year=False)
     p.add_argument("name")
     p = cmd("player", player, "One player's batting and bowling by year and by phase", limit=100)
     p.add_argument("name", help="part of the name (kohli) or the player_id")
+    p = cmd("matchup", matchup, "One batter against one bowler, by year", limit=100)
+    p.add_argument("batter", help="name or player_id")
+    p.add_argument("bowler", help="name or player_id")
+    p = cmd("venues", venues, "Grounds: average first innings, bat-first vs chasing wins, highest total")
+    p.add_argument("name", nargs="?", help="part of the ground name, e.g. wankhede or kotla")
+    cmd("champions", champions, "Every IPL final: champion, runner-up, result; titles by team", limit=20)
+    p = cmd("team", team, "One team season by season: played, won, lost, how far they got", limit=100)
+    p.add_argument("code", help="team code, e.g. CSK")
     p = cmd("phase", phase, "Best batters or bowlers in a phase", min_balls=60)
     p.add_argument("phase", choices=["powerplay", "middle", "death"])
     p.add_argument("--role", choices=["bat", "bowl"], default="bat")
