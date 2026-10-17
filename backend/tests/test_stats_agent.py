@@ -447,3 +447,15 @@ def test_ground_report_compares_with_the_league(db):
     assert queries.run(["ground", "nowhere"], db=db)[0]["text"].startswith("No IPL ground")
     calls = stats.rule_plan("what is the pitch like at Chepauk?", {}, None)
     assert calls == [{"name": "ground_report", "args": {"name": "Chidambaram"}}]
+
+
+def test_graph_answers_an_ambiguous_name_with_choices(db, monkeypatch):
+    from backend.agent.service import CricbotAgent
+
+    index = stats.PlayerIndex.build([stats.Player(1, "Hardik Pandya", 200, 150, 116),
+                                     stats.Player(2, "Krunal Pandya", 150, 110, 120)])
+    monkeypatch.setattr(stats, "player_index", lambda: index)
+    result = CricbotAgent(llm=FakeRouter(fail_plan=True)).answer("Pandya's batting record in the IPL")
+    assert [c["type"] for c in result["cards"]] == ["clarify"]
+    assert [o["label"] for o in result["cards"][0]["options"]] == ["Hardik Pandya", "Krunal Pandya"]
+    assert "which one" in result["reply"]

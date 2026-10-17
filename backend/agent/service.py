@@ -301,8 +301,9 @@ class CricbotAgent:
         return {
             "stats_results": results,
             "compact_results": facts,
+            # An ambiguous name is answered with choices; the stats card only when there is a table to show.
             "cards": [card for card in (stats.clarify_card(results, state["query"]),
-                                        stats.card(results, state["query"])) if card],
+                                        stats.card(results, state["query"]) if tables else None) if card],
             "results": [],
             "match_target": None,
             "intermediate_message": f"Ran {len(results)} archive quer{'y' if len(results) == 1 else 'ies'}: {tables} table{'s' if tables != 1 else ''}"
