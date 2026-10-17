@@ -565,10 +565,11 @@ def prefer_rules(llm_calls: list[dict[str, Any]], rule_calls: list[dict[str, Any
     (e.g. one player profile when the question compares two)."""
     if not llm_calls:
         return True
-    named = {str(v).casefold() for c in rule_calls for k, v in (c.get("args") or {}).items()
-             if k in ("name", "batter", "bowler")}
-    looked_at = {str(v).casefold() for c in llm_calls for k, v in (c.get("args") or {}).items()
-                 if k in ("name", "batter", "bowler")}
+    player_tools = ("player_profile", "batter_vs_bowler")    # venue_stats also has a "name": a ground, not a player
+    named = {str(v).casefold() for c in rule_calls if c["name"] in player_tools
+             for k, v in (c.get("args") or {}).items() if k in ("name", "batter", "bowler")}
+    looked_at = {str(v).casefold() for c in llm_calls if c["name"] in player_tools
+                 for k, v in (c.get("args") or {}).items() if k in ("name", "batter", "bowler")}
     if named and not looked_at:
         return True                                   # the question names a player the LLM plan never looks at
     same_tool = {c["name"] for c in llm_calls} == {c["name"] for c in rule_calls}

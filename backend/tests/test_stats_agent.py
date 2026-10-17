@@ -274,3 +274,41 @@ def test_rate_limited_model_falls_through_to_the_next():
     provider.api_key = "test"
     calls, name, model = LLMRouter([provider]).plan([{"role": "user", "content": "who won IPL 2019"}], stats.TOOLS)
     assert seen == ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"] and model == "qwen/qwen3.8-27b" and calls[0]["name"] == "champions"
+
+
+def test_v2_set_and_robustness_scoring():
+    from backend.eval.run_qna import asked, entity_check, signature
+
+    items = [json.loads(line) for line in (EVAL / "qna_ipl_v2.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(items) >= 70 and len({i["id"] for i in items}) == len(items)
+    groups = {}
+    for item in items:
+        assert item["expect"] in ("answer", "clarify", "refuse") and item["checks"]
+        if item["group"]:
+            groups.setdefault(item["group"], []).append(item)
+    assert len(groups) >= 15 and all(len(g) == 3 for g in groups.values())
+
+    assert asked("Which Sharma do you mean: Rohit Sharma or Mohit Sharma?")
+    assert not asked("Rohit Sharma scored 417 runs in 2024.")
+    index = stats.PlayerIndex([stats.Player(1, "Virat Kohli", 300), stats.Player(2, "Jasprit Bumrah", 200)])
+    for p in index.players:
+        for key in stats._name_keys(p.name):
+            index.keys.setdefault(key, []).append(p)
+    item = {"entities": {"players": ["Virat Kohli", "Jasprit Bumrah"]}}
+    ok, _ = entity_check(item, [{"name": "batter_vs_bowler", "args": {"batter": "Kohli", "bowler": "Bumrah"}}], index)
+    assert ok
+    ok, note = entity_check({"entities": {"players": ["Yuzvendra Chahal"]}},
+                            [{"name": "player_profile", "args": {"name": "Jasprit Bumrah"}}], index)
+    assert ok is False and "bumrah" in note
+    ok, note = entity_check({"entities": {"years": [2016]}}, [{"name": "batting_leaders", "args": {"year": "2015"}}], index)
+    assert ok is False and "2015" in note
+    a = signature([{"name": "champions", "args": {"year": "2016"}}])
+    assert a == signature([{"name": "champions", "args": {"year": "2016", "x": None}}])
+
+
+def test_a_venue_name_is_not_a_player_name():
+    """Rules planning venue_stats(name=...) must not override an LLM plan that names no player."""
+    llm = [{"name": "head_to_head", "args": {"team1": "CSK", "team2": "MI"}}]
+    rules = [{"name": "venue_stats", "args": {"name": "Chidambaram"}}]
+    assert not stats.prefer_rules(llm, rules)
+    assert stats.prefer_rules([{"name": "batting_leaders", "args": {}}], [{"name": "player_profile", "args": {"name": "MS Dhoni"}}])

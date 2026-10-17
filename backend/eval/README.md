@@ -114,3 +114,59 @@ allowance runs out, Pandit moves to the next model in `GROQ_PLAN_MODEL` / `GROQ_
   built from the tables, so a wrong answer comes from a wrong plan, not from invented figures.
 - The sets are small (130 + 43), so one question moves a category by several points. Treat
   differences of a few percent as noise.
+
+## v2: robustness set (88 questions)
+
+`qna_ipl_v2.jsonl`, built by `build_qna_v2.py`, tests how Pandit behaves rather than what it
+covers:
+
+| Part | Questions | Right behaviour |
+|---|---|---|
+| Paraphrase groups | 20 groups × 3 | Same correct answer whatever the wording, including order traps ("Bumrah vs Kohli", "Rashid Khan bowling to Dhoni") |
+| Shared surnames | 8 | Ask which player ("Sharma", "Pandya", "Iyer") |
+| Clear short names | 8 | Answer without asking ("Rashid", "Hardik", "Rohit's runs") |
+| Out of scope | 12 | Say it is outside the IPL archive (WPL, Tests, T20Is, BBL, PSL, auctions, predictions, age, live scores, football) |
+
+Metrics: accuracy per wording; groups right all three ways; groups with a consistent outcome;
+groups with an identical plan; **entity accuracy** (the plan used exactly the expected players,
+teams and years, which would have caught Chahal → Bumrah); clarify rate; needless-question rate;
+refusal rate, and how many out-of-scope questions ran IPL queries anyway.
+
+```bash
+python -m backend.eval.run_qna --dataset backend/eval/qna_ipl_v2.jsonl --planner rules            # the app without LLM keys
+python -m backend.eval.run_qna --dataset backend/eval/qna_ipl_v2.jsonl --planner hybrid           # LLM plans, tables answer (~130k tokens)
+python -m backend.eval.run_qna --dataset backend/eval/qna_ipl_v2.jsonl --planner hybrid --answer  # the full app
+```
+
+Runs save after every question, so a stopped run keeps what it finished.
+
+### Baseline, 17 Oct 2026 (the app without LLM keys)
+
+| Metric | Score |
+|---|---|
+| Paraphrase questions answered correctly | 38/60 (63%) |
+| Groups right all three ways | 6/20 |
+| Groups with a consistent outcome | 7/20 |
+| Groups with the same plan | 6/20 |
+| Entity accuracy | 37/56 (66%) |
+| Asks when the name is shared | 8/8 |
+| Answers when the name is clear | 3/8 |
+| Refuses out-of-scope questions | 4/12, all by the generic "couldn't find" reply |
+| Out-of-scope questions answered with IPL numbers | 5 |
+
+With the LLM planner (gpt-oss-20b), the first 45 questions (15 groups) before Groq's daily token
+limit stopped the run: 36/45 correct (rules: 31/45), 8/15 groups right all three ways (rules: 5/15).
+
+What it found:
+
+- **Out-of-scope questions get IPL answers.** "Most runs in WPL 2024" returns IPL 2024's top
+  scorer, "Kohli's Test average" returns his IPL average, "ISL titles" returns IPL titles. Nothing
+  checks scope before planning.
+- **First names and short names are not recognised in free text** ("Hardik", "Rohit", "Bhuvneshwar",
+  "Suryakumar"), and **"Rashid" resolves to AU Rashid** (Adil Rashid, 3 IPL innings) instead of
+  Rashid Khan: only full names and surnames are indexed.
+- **Word order flips batter and bowler**: "Bumrah vs Kohli" is planned as Bumrah batting.
+- **The LLM misreads some wordings**: "maximums" planned as highest score, "MS Dhoni vs Rashid
+  Khan" as two profiles instead of the matchup, a 2024 death-overs question without the year.
+- A rule-fallback bug, fixed: a venue's `name` argument was treated as a player name, so the
+  rules' venue plan overrode a correct LLM head-to-head plan for "Chennai against Mumbai".
