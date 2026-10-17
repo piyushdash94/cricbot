@@ -62,10 +62,14 @@ Measured on 17 Oct 2026 with Groq (`gpt-oss-20b` planning, `gpt-oss-120b` writin
 | Planner | Answer written by | Route | Answer |
 |---|---|---|---|
 | Keyword rules | summary of the tables (no LLM) | 36/43 (84%) | 30/38 (79%) |
-| LLM tool calling only | summary of the tables (no LLM) | 39/43 (91%) | 32/38 (84%) |
+| LLM tool calling only | summary of the tables (no LLM) | 39/43 (91%) | 32/36 (89%)* |
 | **Hybrid: LLM plan, rules fallback (the app)** | **LLM, under the grounding check** | **43/43 (100%)** | **35/38 (92%)** |
 
 All 14 published answers on the held-out set were right end to end.
+
+\* Four questions in the LLM-only run hit Groq's rate limit and fell back to no plan; they are left
+out (two were stats questions, two single-match questions that passed only by default). Counting
+them as wrong gives 32/38 (84%).
 
 **Development set (130 questions; optimistic, because it was used for tuning)**
 
