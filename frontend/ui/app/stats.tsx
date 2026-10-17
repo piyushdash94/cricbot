@@ -1,7 +1,7 @@
 "use client";
 
-// Stats workspace: season and all-time leaders, records, phases, player profiles and head to
-// head, served by /api/stats/* (backend/apis/stats.py) over the local DuckDB archive.
+// Stats workspace: season and all-time leaders, records, phases, player profiles, matchups, teams
+// and grounds, served by /api/stats/* (backend/apis/stats.py) over the local DuckDB archive.
 // Every endpoint returns the same "blocks" (tables or notes), so one renderer covers them all.
 
 import { useCallback, useEffect, useState } from "react";
@@ -12,7 +12,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 type Cell = string | number | null;
 type Block = { type: "table"; title: string; columns: string[]; rows: Cell[][] } | { type: "text"; text: string };
 type StatsStatus = { available: boolean; hint?: string; sources?: { cricsheet: number; espn: number }; years?: number[] };
-type StatsTab = "leaders" | "records" | "phases" | "players" | "h2h";
+type StatsTab = "leaders" | "records" | "phases" | "players" | "matchups" | "teams" | "grounds";
 type Phase = "powerplay" | "middle" | "death";
 
 const TABS: { id: StatsTab; label: string }[] = [
@@ -20,8 +20,16 @@ const TABS: { id: StatsTab; label: string }[] = [
   { id: "records", label: "Records" },
   { id: "phases", label: "Phases" },
   { id: "players", label: "Players" },
-  { id: "h2h", label: "Head to head" },
+  { id: "matchups", label: "Matchups" },
+  { id: "teams", label: "Teams" },
+  { id: "grounds", label: "Grounds" },
 ];
+// Tabs whose tables are already season by season: they always cover every season.
+const ALL_SEASON_TABS: StatsTab[] = ["matchups", "teams", "grounds"];
+const BAT_SORTS: [string, string][] = [["runs", "Runs"], ["sixes", "Sixes"], ["fours", "Fours"], ["sr", "Strike rate"],
+  ["avg", "Average"], ["fifties", "Fifties"], ["hundreds", "Hundreds"], ["hs", "Highest score"]];
+const BOWL_SORTS: [string, string][] = [["wkts", "Wickets"], ["econ", "Economy"], ["avg", "Average"], ["sr", "Strike rate"],
+  ["4w", "4-wicket hauls"]];
 const TEAMS = ["CSK", "DC", "GT", "KKR", "LSG", "MI", "PBKS", "RCB", "RR", "SRH", "DCH", "GL", "KTK", "PWI", "RPS"];
 const LABELS: Record<string, string> = {
   player: "Player", team: "Team", runs: "R", inns: "Inns", outs: "Out", avg: "Avg", sr: "SR", hs: "HS", wkts: "W",
@@ -31,7 +39,11 @@ const LABELS: Record<string, string> = {
   won: "W", lost: "L", win_pct: "Win %", finish: "Finish", champion: "Champion", runner_up: "Runner-up", result: "Result",
   ground: "Ground", titles: "Titles", years: "Years", avg_1st_inns: "Avg 1st inns", bat_first_won: "Won bat 1st",
   chasing_won: "Won chasing", highest_total: "Highest", run_rate: "RR", matches: "M", with_balls: "With balls",
-  avg_1st: "Avg 1st", sixes: "6s", "4w+": "4w+",
+  avg_1st: "Avg 1st", sixes: "6s", "4w+": "4w+", "4s": "4s", "6s": "6s", "50s": "50s", "100s": "100s",
+  league_1st: "League 1st", vs_league: "vs league", league_rr: "League RR", chase_win_pct: "Chase win %",
+  boundary_pct: "Bdry %", league_boundary_pct: "League bdry %", league_dot_pct: "League dot %",
+  wkts_per_inns: "W / inns", league_wkts: "League W", dismissal: "How out", pct: "%", league_pct: "League %",
+  fours: "4s",
 };
 
 async function getBlocks(path: string): Promise<Block[]> {
@@ -50,7 +62,7 @@ function cell(value: Cell) {
 // ------------------------------------------------------------------ building blocks
 
 // Leaderboard cards are narrow: keep the columns a reader scans for (the full set is in the API).
-const COMPACT_COLUMNS = ["player", "runs", "wkts", "avg", "sr", "econ", "hs", "best"];
+const COMPACT_COLUMNS = ["player", "runs", "wkts", "avg", "sr", "econ", "hs", "best", "6s", "4s", "50s", "100s", "4w+"];
 
 function compactBlock(block: Extract<Block, { type: "table" }>) {
   const keep = block.columns.map((column, index) => [column, index] as const).filter(([column]) => COMPACT_COLUMNS.includes(column));
@@ -138,6 +150,28 @@ export function StatsChatCard({ card, onOpenStats }: { card: StatsCard; onOpenSt
   </article>;
 }
 
+// An ambiguous name comes back as choices; each re-asks the question about one player.
+export type ClarifyCard = { type: "clarify"; title: string; name: string; options: { label: string; question: string }[] };
+// A question outside the archive (WPL, Tests, other leagues...): say so, offer IPL questions.
+export type ScopeCard = { type: "scope"; title: string; topic: string; suggestions: string[] };
+
+export function ClarifyChatCard({ card, onAsk, disabled }: { card: ClarifyCard; onAsk: (question: string) => void; disabled?: boolean }) {
+  return <article className="chat-card chat-choice" aria-label={card.title}>
+    <h4>{card.title}</h4>
+    <div className="chat-chips">{card.options.map((option) =>
+      <button key={option.label} disabled={disabled} onClick={() => onAsk(option.question)}>{option.label}</button>)}</div>
+  </article>;
+}
+
+export function ScopeChatCard({ card, onAsk, disabled }: { card: ScopeCard; onAsk: (question: string) => void; disabled?: boolean }) {
+  return <article className="chat-card chat-scope">
+    <h4><span aria-hidden="true">⌀</span>{card.title}<small>{card.topic}</small></h4>
+    <p className="stats-note">Try one of these instead:</p>
+    <div className="chat-chips">{card.suggestions.map((question) =>
+      <button key={question} disabled={disabled} onClick={() => onAsk(question)}>{question}</button>)}</div>
+  </article>;
+}
+
 // ------------------------------------------------------------------ panel
 
 export function StatsPanel({ season, seasons, matchOpen, onBackToMatch, onClose }: {
@@ -153,7 +187,14 @@ export function StatsPanel({ season, seasons, matchOpen, onBackToMatch, onClose 
   const [playerSearch, setPlayerSearch] = useState("");
   const [playerId, setPlayerId] = useState<number | null>(null);
   const [team1, setTeam1] = useState("MI");
-  const [team2, setTeam2] = useState("CSK");
+  const [team2, setTeam2] = useState("");          // "": season by season; a code: head to head
+  const [batSort, setBatSort] = useState("runs");
+  const [bowlSort, setBowlSort] = useState("wkts");
+  const [leaderTeam, setLeaderTeam] = useState("");
+  const [batterInput, setBatterInput] = useState("Virat Kohli");
+  const [bowlerInput, setBowlerInput] = useState("Jasprit Bumrah");
+  const [pair, setPair] = useState<[string, string]>(["Virat Kohli", "Jasprit Bumrah"]);
+  const [ground, setGround] = useState("Wankhede Stadium");
 
   useEffect(() => {
     fetch(`${API_BASE}/api/stats/status`).then((r) => r.ok ? r.json() : Promise.reject())
@@ -161,7 +202,9 @@ export function StatsPanel({ season, seasons, matchOpen, onBackToMatch, onClose 
   }, []);
 
   const yearParam = year === "all" ? "" : `year=${year}&`;
-  const span = year === "all" ? "All time" : `IPL ${year}`;
+  const everySeason = ALL_SEASON_TABS.includes(tab);
+  const span = everySeason ? "Every season" : year === "all" ? "All time" : `IPL ${year}`;
+  const teamParam = leaderTeam ? `team=${leaderTeam}&` : "";
   const years = status?.years?.length ? [...status.years].reverse() : seasons;
 
   // A leaderboard name opens that player's profile (exact name first, else the closest match).
@@ -203,7 +246,7 @@ export function StatsPanel({ season, seasons, matchOpen, onBackToMatch, onClose 
       <h2>{span}</h2>
       <div className="stats-year">
         <label htmlFor="stats-year">Season</label>
-        <select id="stats-year" value={year} onChange={(event) => setYear(event.target.value)}>
+        <select id="stats-year" value={everySeason ? "all" : year} disabled={everySeason} title={everySeason ? "These tables are already season by season" : undefined} onChange={(event) => setYear(event.target.value)}>
           <option value="all">All time</option>
           {years.map((y) => <option key={y} value={String(y)}>{y}</option>)}
         </select>
@@ -220,11 +263,23 @@ export function StatsPanel({ season, seasons, matchOpen, onBackToMatch, onClose 
       <button className={role === "bat" ? "active" : ""} onClick={() => setRole("bat")}>Batting</button>
       <button className={role === "bowl" ? "active" : ""} onClick={() => setRole("bowl")}>Bowling</button>
     </div>}
-    {tab === "h2h" && <div className="innings-filter stats-h2h">
-      <select aria-label="First team" value={team1} onChange={(e) => setTeam1(e.target.value)}>{TEAMS.map((t) => <option key={t}>{t}</option>)}</select>
-      <span>v</span>
-      <select aria-label="Second team" value={team2} onChange={(e) => setTeam2(e.target.value)}>{TEAMS.map((t) => <option key={t}>{t}</option>)}</select>
+    {tab === "leaders" && <div className="innings-filter stats-controls">
+      <label>Batting by <select aria-label="Rank batters by" value={batSort} onChange={(e) => setBatSort(e.target.value)}>{BAT_SORTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
+      <label>Bowling by <select aria-label="Rank bowlers by" value={bowlSort} onChange={(e) => setBowlSort(e.target.value)}>{BOWL_SORTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
+      <label>For <select aria-label="Team" value={leaderTeam} onChange={(e) => setLeaderTeam(e.target.value)}><option value="">All teams</option>{TEAMS.map((t) => <option key={t}>{t}</option>)}</select></label>
     </div>}
+    {tab === "teams" && <div className="innings-filter stats-h2h">
+      <select aria-label="Team" value={team1} onChange={(e) => { setTeam1(e.target.value); if (e.target.value === team2) setTeam2(""); }}><option value="">All teams</option>{TEAMS.map((t) => <option key={t}>{t}</option>)}</select>
+      {team1 && <><span>against</span>
+        <select aria-label="Opponent" value={team2} onChange={(e) => setTeam2(e.target.value)}><option value="">Season by season</option>{TEAMS.filter((t) => t !== team1).map((t) => <option key={t}>{t}</option>)}</select></>}
+    </div>}
+    {tab === "matchups" && <form className="innings-filter stats-search stats-pair" onSubmit={(e) => { e.preventDefault(); setPair([batterInput.trim(), bowlerInput.trim()]); }}>
+      <input value={batterInput} onChange={(e) => setBatterInput(e.target.value)} placeholder="Batter" aria-label="Batter" />
+      <span>v</span>
+      <input value={bowlerInput} onChange={(e) => setBowlerInput(e.target.value)} placeholder="Bowler" aria-label="Bowler" />
+      <button className="active" disabled={batterInput.trim().length < 2 || bowlerInput.trim().length < 2}>Compare</button>
+    </form>}
+    {tab === "grounds" && <GroundPicker value={ground} onChange={setGround} />}
     {tab === "players" && <form className="innings-filter stats-search" onSubmit={submitPlayer}>
       <input value={playerQuery} onChange={(e) => setPlayerQuery(e.target.value)} placeholder="Search a player: Bumrah, Gayle, Kohli…" aria-label="Search players" />
       <button className="active" disabled={playerQuery.trim().length < 2}>Search</button>
@@ -232,8 +287,8 @@ export function StatsPanel({ season, seasons, matchOpen, onBackToMatch, onClose 
 
     <div className="workspace-body">
       {tab === "leaders" && <div className="overview-grid">
-        <Blocks path={`/api/stats/batting?${yearParam}limit=10`} onPlayer={openPlayer} compact />
-        <Blocks path={`/api/stats/bowling?${yearParam}limit=10`} onPlayer={openPlayer} compact />
+        <Blocks path={`/api/stats/batting?${yearParam}${teamParam}sort=${batSort}&limit=10`} onPlayer={openPlayer} compact />
+        <Blocks path={`/api/stats/bowling?${yearParam}${teamParam}sort=${bowlSort}&limit=10`} onPlayer={openPlayer} compact />
       </div>}
       {tab === "records" && <Blocks path={`/api/stats/records?${yearParam}limit=5`} onPlayer={openPlayer} />}
       {tab === "phases" && <Blocks path={`/api/stats/phase?phase=${phase}&role=${role}&${yearParam}min_balls=${year === "all" ? 300 : 60}&limit=15`} onPlayer={openPlayer} />}
@@ -243,9 +298,9 @@ export function StatsPanel({ season, seasons, matchOpen, onBackToMatch, onClose 
         : playerSearch.length >= 2
           ? <PlayerResults query={playerSearch} onPick={setPlayerId} />
           : <div className="empty-state"><strong>Find a player</strong><p>Season-by-season numbers and powerplay / middle / death splits. Tip: click any name in Leaders.</p></div>)}
-      {tab === "h2h" && (team1 === team2
-        ? <div className="empty-state"><strong>Pick two different teams</strong></div>
-        : <Blocks path={`/api/stats/h2h?team1=${team1}&team2=${team2}${year === "all" ? "" : `&year=${year}`}`} />)}
+      {tab === "matchups" && <Blocks path={`/api/stats/matchup?batter=${encodeURIComponent(pair[0])}&bowler=${encodeURIComponent(pair[1])}`} />}
+      {tab === "teams" && <Blocks path={!team1 ? "/api/stats/champions" : team2 ? `/api/stats/h2h?team1=${team1}&team2=${team2}` : `/api/stats/teams/${team1}`} />}
+      {tab === "grounds" && <GroundReport name={ground} />}
     </div>
   </div>;
 }
@@ -261,4 +316,55 @@ function PlayerResults({ query, onPick }: { query: string; onPick: (id: number) 
       <strong>{cell(row[1])}</strong><span>{cell(row[4])}–{cell(row[5])}</span><small>{cell(row[2])} bat · {cell(row[3])} bowl innings</small>
     </button>)}</div>
   </article>;
+}
+
+// ------------------------------------------------------------------ grounds
+
+function GroundPicker({ value, onChange }: { value: string; onChange: (name: string) => void }) {
+  const { blocks } = useBlocks("/api/stats/venues?limit=40");
+  const table = blocks?.find((block) => block.type === "table");
+  const names = table && table.type === "table" ? table.rows.map((row) => String(row[0])) : [value];
+  return <div className="innings-filter stats-h2h">
+    <select aria-label="Ground" value={value} onChange={(e) => onChange(e.target.value)}>
+      {(names.includes(value) ? names : [value, ...names]).map((name) => <option key={name}>{name}</option>)}
+    </select>
+    {table && table.type === "table" && <span className="stats-note">{table.rows.length} grounds, by matches played</span>}
+  </div>;
+}
+
+type Table = Extract<Block, { type: "table" }>;
+
+// Par score by season against the league in the same season: one bar per season, right of the
+// line when the ground scored above the league, left when below.
+function ParChart({ table }: { table: Table }) {
+  const col = (name: string) => table.columns.indexOf(name);
+  const seasons = table.rows.filter((row) => row[0] !== "Total" && typeof row[col("vs_league")] === "number");
+  const scale = Math.max(10, ...seasons.map((row) => Math.abs(Number(row[col("vs_league")]))));
+  return <article className="detail-card stats-card">
+    <div className="card-title"><h3>Par score against the league</h3><small>first innings, same season</small></div>
+    <div className="par-chart" role="list">{seasons.map((row) => {
+      const diff = Number(row[col("vs_league")]);
+      const width = `${(Math.abs(diff) / scale) * 50}%`;
+      return <div role="listitem" className="par-row" key={String(row[0])} title={`${row[0]}: ${row[col("avg_1st_inns")]} here vs ${row[col("league_1st")]} league (${row[col("matches")]} matches)`}>
+        <span>{String(row[0])}</span>
+        <div className="par-track"><i className={diff >= 0 ? "up" : "down"} style={diff >= 0 ? { left: "50%", width } : { right: "50%", width }} /></div>
+        <b className={diff >= 0 ? "up" : "down"}>{diff > 0 ? "+" : ""}{diff}</b>
+        <small>{String(row[col("matches")])} m</small>
+      </div>;
+    })}</div>
+  </article>;
+}
+
+function GroundReport({ name }: { name: string }) {
+  const { blocks, error, loading } = useBlocks(`/api/stats/grounds/${encodeURIComponent(name)}`);
+  if (loading && !blocks) return <div className="detail-loading"><span /><strong>Reading the ground…</strong></div>;
+  if (error) return <div className="error-state"><strong>Ground report unavailable</strong><p>{error}</p></div>;
+  const tables = (blocks ?? []).filter((block): block is Table => block.type === "table");
+  const notes = (blocks ?? []).filter((block) => block.type === "text");
+  return <div className={`scorecard-stack${loading ? " stats-refreshing" : ""}`}>
+    {notes.map((note, index) => note.type === "text" && <p key={index} className="ground-verdict">{note.text}</p>)}
+    {tables[0] && <ParChart table={tables[0]} />}
+    {tables.slice(1).map((table, index) => <BlockCard key={index} block={table} />)}
+    {tables[0] && <BlockCard block={tables[0]} />}
+  </div>;
 }
