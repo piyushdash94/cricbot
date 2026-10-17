@@ -74,6 +74,9 @@ TOOLS: list[dict[str, Any]] = [
     _fn("champions", "Each final's champion, runner-up and result; titles by team.", {"year": YEAR_PARAM}),
     _fn("venue_stats", "Grounds: average first innings, bat-first vs chasing wins, highest total.",
         {"name": {"type": "string", "description": "ground or nickname, e.g. Wankhede, Chepauk"}, "year": YEAR_PARAM}),
+    _fn("ground_report", "One ground's character against the league: par score by season, phase scoring, how "
+        "wickets fall, chasing (pitch / conditions questions).",
+        {"name": {"type": "string", "description": "ground or nickname"}, "year": YEAR_PARAM}, ["name"]),
     _fn("season_summary", "Per season: matches, run rate, average first innings, highest total, total sixes.",
         {"year": YEAR_PARAM}),
 ]
@@ -108,6 +111,13 @@ class Player:
     player_id: int
     name: str
     innings: int
+    bat: int = 0                                      # batting innings
+    bowl: int = 0                                     # bowling innings
+
+    @property
+    def bat_share(self) -> float:
+        """How much of a batter this player is: 1.0 never bowls, 0.0 never bats."""
+        return self.bat / (self.bat + self.bowl) if self.bat + self.bowl else 0.5
 
 
 @dataclass
@@ -116,6 +126,7 @@ class PlayerIndex:
 
     players: list[Player] = field(default_factory=list)
     keys: dict[str, list[Player]] = field(default_factory=dict)
+    first: dict[str, list[Player]] = field(default_factory=dict)   # "rashid" -> Rashid Khan, "rohit" -> ...
 
     @classmethod
     def load(cls, path: str | None = None) -> "PlayerIndex":
@@ -124,22 +135,38 @@ class PlayerIndex:
             tables = {r[0] for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
             con.execute(queries.FRANCHISE_MACRO + queries.source_views(tables) + queries.VIEWS)
             rows = con.execute("""
-                SELECT player_id, any_value(player), count(*) FROM (
-                    SELECT player_id, player FROM bat_inn UNION ALL SELECT player_id, player FROM bowl_inn)
+                SELECT player_id, any_value(player), count(*), count(*) FILTER (WHERE r = 'bat'),
+                       count(*) FILTER (WHERE r = 'bowl') FROM (
+                    SELECT player_id, player, 'bat' AS r FROM bat_inn
+                    UNION ALL SELECT player_id, player, 'bowl' AS r FROM bowl_inn)
                 WHERE player_id IS NOT NULL GROUP BY player_id""").fetchall()
         finally:
             con.close()
-        index = cls([Player(int(pid), name, int(n)) for pid, name, n in rows if name])
+        return cls.build([Player(int(pid), name, int(n), int(bat), int(bowl)) for pid, name, n, bat, bowl in rows if name])
+
+    @classmethod
+    def build(cls, players: list[Player]) -> "PlayerIndex":
+        index = cls(players)
         for player in index.players:
             for key in _name_keys(player.name):
                 index.keys.setdefault(key, []).append(player)
+            tokens = _norm(player.name).split()
+            # Full first names only ("Rashid Khan" -> rashid), never initials ("MS Dhoni" -> ms).
+            if len(tokens) >= 2 and len(tokens[0]) >= 4 and tokens[0] not in FIRST_NAME_STOP:
+                index.first.setdefault(tokens[0], []).append(player)
         return index
+
+    def _candidates(self, key: str) -> list[Player]:
+        """Surname matches plus first-name matches: "rashid" is AU Rashid (3 innings) or Rashid Khan."""
+        seen = {p.player_id: p for p in [*self.keys.get(key, []), *self.first.get(key, [])]}
+        return list(seen.values())
 
     def lookup(self, name: str) -> tuple[Player | None, list[Player]]:
         """(player, []) when the name is clear, (None, candidates) when it is ambiguous or unknown."""
         text = _norm(name)
         if not text:
             return None, []
+        text = _norm(NICKNAMES.get(text, text))
         exact = [p for p in self.players if _norm(p.name) == text]
         if len(exact) == 1:
             return exact[0], []
@@ -154,7 +181,7 @@ class PlayerIndex:
                 return _dominant(initial)
             if self.keys.get(surname):                # wrong first name, clear surname: "Chris Pollard"
                 return _dominant(self.keys[surname])
-        candidates = self.keys.get(text, [])
+        candidates = self._candidates(text)
         if not candidates:
             candidates = [p for p in self.players if text in _norm(p.name)]
         return _dominant(candidates) if candidates else (None, [])
@@ -165,17 +192,21 @@ class PlayerIndex:
         found: list[tuple[int, Player]] = []
         ambiguous: list[str] = []
         taken: list[tuple[int, int]] = []
-        for key in sorted(self.keys, key=len, reverse=True):
-            if len(key) < 4 or key in COMMON_WORDS:
+        nicknames = {key: [p for p in self.players if _norm(p.name) == _norm(full)] for key, full in NICKNAMES.items()}
+        keys = {**{k: v for k, v in self.first.items() if k not in self.keys}, **self.keys,
+                **{k: v for k, v in nicknames.items() if v}}
+        for key in sorted(keys, key=len, reverse=True):
+            if (len(key) < 4 and key not in NICKNAMES) or key in COMMON_WORDS:
                 continue
             for match in re.finditer(rf"(?<=[ ]){re.escape(key)}(?=[ ])", lowered):
                 span = (match.start(), match.end())
                 if any(a < span[1] and span[0] < b for a, b in taken):
                     continue
-                player, _ = _dominant(self.keys[key])
+                player, _ = _dominant(keys[key] if key in nicknames else self._candidates(key))
                 taken.append(span)
                 if player is None:
-                    ambiguous.append(key)
+                    if key in self.keys:              # a shared surname asks; a shared first name ("Chris") is skipped
+                        ambiguous.append(key)
                 elif all(player.player_id != p.player_id for _, p in found):
                     found.append((span[0], player))
         return [player for _, player in sorted(found, key=lambda item: item[0])], ambiguous
@@ -188,6 +219,16 @@ class PlayerIndex:
 COMMON_WORDS = {"head", "short", "white", "green", "hope", "wood", "young", "power", "little", "best", "king",
                 "bell", "cook", "hill", "stone", "price", "rose", "will", "most", "more", "over", "overs", "great",
                 "fine", "long", "lewis", "hunt", "jordan", "dube", "salt"}
+
+
+# First names that are also place or team words ("Arun Jaitley Stadium", "Royal Challengers").
+FIRST_NAME_STOP = {"arun", "rajiv", "narendra", "sawai", "feroz", "sardar", "subrata", "royal", "super", "knight",
+                   "kings", "test", "world", "mark", "will", "jack", "most", "best", "rich", "long", "young", "glenn"}
+# Names fans use. Each maps to the archive's full name.
+NICKNAMES = {"sky": "Suryakumar Yadav", "bhuvi": "Bhuvneshwar Kumar", "abd": "AB de Villiers", "mahi": "MS Dhoni",
+             "thala": "MS Dhoni", "jaddu": "Ravindra Jadeja", "hitman": "Rohit Sharma", "gabbar": "Shikhar Dhawan",
+             "universe boss": "Chris Gayle", "dre russ": "Andre Russell", "king kohli": "Virat Kohli",
+             "boom boom": "Jasprit Bumrah", "chahal": "Yuzvendra Chahal"}
 
 
 def _norm(value: str) -> str:
@@ -229,6 +270,16 @@ class PlanError(ValueError):
     pass
 
 
+class UnknownPlayer(PlanError):
+    pass
+
+
+class AmbiguousName(PlanError):
+    def __init__(self, name: str, candidates: list[Player]):
+        self.name, self.candidates = name, candidates
+        super().__init__(f"'{name}' could be {', '.join(p.name for p in candidates)}; which one?")
+
+
 def _year(args: dict[str, Any]) -> list[str]:
     value = str(args.get("year") or "").strip()
     if value.casefold() in ("", "none", "null", "all", "all time", "all-time"):
@@ -240,6 +291,7 @@ def _year(args: dict[str, Any]) -> list[str]:
 
 def _team(value: Any) -> str:
     code = queries.Q.team(str(value or ""))
+    code = TEAM_NAMES.get(str(value or "").casefold().strip(), code)
     if code not in TEAM_CODES:
         resolved, _ = _team_entities(str(value or "").casefold(), fuzzy=False)
         code = resolved[0] if resolved else code
@@ -262,9 +314,8 @@ def _player(name: Any, index: PlayerIndex) -> tuple[str, str]:
     if player:
         return str(player.player_id), player.name
     if candidates:
-        names = ", ".join(p.name for p in candidates)
-        raise PlanError(f"'{name}' could be {names}; which one?")
-    raise PlanError(f"no IPL player matching '{name}'")
+        raise AmbiguousName(str(name), candidates)
+    raise UnknownPlayer(f"no IPL player matching '{name}'")
 
 
 def to_argv(call: dict[str, Any], index: PlayerIndex | None = None) -> list[str]:
@@ -311,6 +362,12 @@ def to_argv(call: dict[str, Any], index: PlayerIndex | None = None) -> list[str]
         return ["venues", *([ground] if ground else []), *_year(args), "--limit", "10"]
     if name == "season_summary":
         return ["seasons", *_year(args)]
+    if name == "ground_report":
+        ground = str(args.get("name") or "").strip()
+        ground = GROUND_ALIASES.get(ground.casefold(), ground)
+        if not ground or len(ground) > 60:
+            raise PlanError("ground_report needs a ground name")
+        return ["ground", ground, *_year(args)]
     raise PlanError(f"unknown tool {name}")
 
 
@@ -323,8 +380,62 @@ def run_calls(calls: list[dict[str, Any]], db: str | None = None, index: PlayerI
             blocks = queries.run(argv, db=db or db_path())
             results.append({**call, "argv": argv, "blocks": blocks, "error": None})
         except PlanError as exc:
-            results.append({**call, "argv": [], "blocks": [{"type": "text", "text": str(exc)}], "error": str(exc)})
+            choices = [p.name for p in exc.candidates] if isinstance(exc, AmbiguousName) else []
+            results.append({**call, "argv": [], "blocks": [{"type": "text", "text": str(exc)}], "error": str(exc),
+                            **({"ambiguous": exc.name, "choices": choices} if choices else {})})
     return results
+
+
+def clarify_card(results: list[dict[str, Any]], question: str) -> dict[str, Any] | None:
+    """Choices for an ambiguous name, each with the question re-asked about that player."""
+    result = next((r for r in results if r.get("choices")), None)
+    if result is None:
+        return None
+    name = result["ambiguous"]
+    pattern = re.compile(rf"(?<![A-Za-z]){re.escape(name)}(?![A-Za-z])", re.IGNORECASE)
+    options = [{"label": full, "question": pattern.sub(full, question, count=1) if pattern.search(question)
+                else f"{question} ({full})"} for full in result["choices"]]
+    return {"type": "clarify", "title": f"Which {name.strip().title()}?", "name": name, "options": options}
+
+
+# ----------------------------------------------------------------- scope
+
+SCOPE_RULES: list[tuple[str, str]] = [
+    (r"\bwpl\b|\bwomen'?s\b|\bwomen\b", "the Women's Premier League or women's cricket"),
+    (r"\btests?\b|\bodis?\b|one[- ]day|world cup|champions trophy|\bt20is?\b|t20 internationals?"
+     r"|\bfor (india|australia|england|pakistan|south africa|new zealand|sri lanka|west indies|bangladesh|afghanistan)\b",
+     "international cricket"),
+    (r"champions league|\bclt ?20\b|big bash|\bbbl\b|\bpsl\b|pakistan super league|\bcpl\b|caribbean premier|\bsa ?20\b|\bilt ?20\b|the hundred"
+     r"|\bmlc\b|major league cricket|\bcounty\b|ranji|vijay hazare|syed mushtaq|lanka premier|\blpl\b|\bbpl\b|t20 blast",
+     "other leagues"),
+    (r"auction|sold for|\bsalary\b|\bsalaries\b|\bcrores?\b|retained for|\bcontract\b|net worth|\bpaid\b|\bearns?\b",
+     "auctions or salaries"),
+    (r"who will win|\bwill (win|score|take)\b|\bpredict|\bfavou?rites?\b|\bodds\b|going to win", "predictions"),
+    (r"how old|\bage\b|\bborn\b|birthday|\bheight\b|\bwife\b|married", "personal details"),
+    (r"\blive (score|match|game|update)s?\b|right now|today'?s (ipl )?(match|game|score)", "live scores"),
+    (r"football|soccer|\bisl\b|\bnba\b|\bnfl\b|tennis|hockey|kabaddi|formula (1|one)|\bf1\b|(?<!indian )premier league",
+     "other sports"),
+]
+
+
+def out_of_scope(question: str, today: date | None = None) -> str | None:
+    """What the question asks about that the archive cannot answer, or None when it is an IPL question."""
+    text = question.casefold()
+    for pattern, topic in SCOPE_RULES:
+        if re.search(pattern, text):
+            return topic
+    year = (today or date.today()).year
+    if any(int(y) > year for y in re.findall(r"\b(20\d\d)\b", text)):
+        return "predictions"
+    return None
+
+
+def scope_reply(topic: str) -> str:
+    return (f"That's outside what I cover: I only have IPL matches (2008 onwards, ball by ball), so I can't answer "
+            f"questions about {topic}. Try an IPL question instead, such as \"most runs in IPL 2024\".")
+
+
+SCOPE_SUGGESTIONS = ["Most runs in IPL 2024", "Who won IPL 2016?", "Kohli against Bumrah", "Average first innings at Wankhede"]
 
 
 # ----------------------------------------------------------------- facts and summaries
@@ -381,7 +492,8 @@ ASKS = [("average first", "avg_1st_inns"), ("first innings", "avg_1st_inns"), ("
         ("chasing", "chasing_won"), ("chase", "chasing_won"), ("batting first", "bat_first_won"),
         ("bat first", "bat_first_won"), ("highest total", "highest_total"), ("highest ipl total", "highest_total"),
         ("run rate", "run_rate"), ("sixes", "sixes"), ("six", "sixes"), ("strike rate", "sr"), ("economy", "econ"),
-        ("economical", "econ"), ("wickets", "wkts"), ("runs", "runs"), ("fours", "4s")]
+        ("economical", "econ"), ("wickets", "wkts"), ("runs", "runs"), ("fours", "4s"), ("maximums", "sixes"),
+        ("aggregate", "runs"), ("hundreds", "100s"), ("centuries", "100s"), ("fifties", "50s"), ("average", "avg")]
 
 
 def _label(column: str) -> str:
@@ -394,16 +506,27 @@ def _pick_block(blocks: list[dict[str, Any]], question: str) -> dict[str, Any] |
         return tables[0] if tables else None
     words = set(re.findall(r"[a-z]+", question.casefold())) - {"the", "in", "of", "a", "ipl", "most", "what", "who", "is"}
     synonyms = {"figures": {"bowling", "figures"}, "fifty": {"fifties", "fastest"}, "individual": {"individual", "score"},
-                "innings": {"innings"}, "total": {"totals", "team"}}
+                "innings": {"innings"}, "total": {"totals", "team"}, "knock": {"individual", "scores"}}
+    # A player's batting or bowling table, by what the question asks for ("Russell's strike rate" is batting).
+    bowl_cue = bool(words & {"wickets", "wicket", "economy", "bowling", "bowled", "scalps", "dismissed", "overs",
+                             "maidens", "bowler"})
+    bat_cue = bool(words & {"runs", "strike", "sr", "sixes", "fours", "batting", "score", "scored", "fifties",
+                            "hundreds", "fast", "batter", "knock"})
     def score(block: dict[str, Any]) -> int:
         title = set(re.findall(r"[a-z]+", block["title"].casefold()))
         extra = sum(len(syn & title) for key, syn in synonyms.items() if key in words)
-        return len(words & title) + extra
+        role = 3 if ("batting" in title and bat_cue and not bowl_cue) or ("bowling" in title and bowl_cue) else \
+            -2 if ("bowling" in title and bat_cue and not bowl_cue) else 0
+        return len(words & title) + extra + role
     return max(tables, key=score)
 
 
-def _describe(cols: list[str], row: list[Any], skip: int = 0) -> str:
-    return ", ".join(f"{_label(c)} {v}" for c, v in list(zip(cols, row))[skip:8] if v is not None and c != "match_id")
+def _describe(cols: list[str], row: list[Any], skip: int = 0, lead: str | None = None) -> str:
+    """The row as "label value" pairs; the column the question asks about comes first, so it is never cut."""
+    pairs = [(c, v) for c, v in list(zip(cols, row))[skip:] if v is not None and c != "match_id"]
+    if lead:
+        pairs = [p for p in pairs if p[0] == lead] + [p for p in pairs if p[0] != lead]
+    return ", ".join(f"{_label(c)} {v}" for c, v in pairs[:8 - skip])
 
 
 def summary(results: list[dict[str, Any]], question: str = "") -> str:
@@ -411,6 +534,9 @@ def summary(results: list[dict[str, Any]], question: str = "") -> str:
     text = question.casefold()
     asked = next((col for phrase, col in ASKS if phrase in text), None)
     years = re.findall(r"\b(20\d\d)\b", text)
+    def lead(cols: list[str]) -> str | None:
+        column = {"sixes": "6s", "fours": "4s"}.get(asked or "", asked) if asked and asked not in cols else asked
+        return column if column in cols else None
     parts = []
     for result in results[:3]:
         notes = [b["text"] for b in result["blocks"] if b["type"] == "text"]
@@ -421,6 +547,9 @@ def summary(results: list[dict[str, Any]], question: str = "") -> str:
         rows, cols = block["rows"], block["columns"]
         if not rows:
             parts.append(f"{block['title']}: no rows.")
+            continue
+        if result["name"] == "ground_report" and notes:
+            parts.append(notes[-1])
             continue
         if result["name"] == "champions":
             finals = next(b for b in result["blocks"] if b["type"] == "table" and b["title"].startswith("IPL finals"))
@@ -436,8 +565,14 @@ def summary(results: list[dict[str, Any]], question: str = "") -> str:
                 top = ", ".join(f"{r[0]} {r[1]}" for r in (titles or {}).get("rows", [])[:5])
                 parts.append(f"IPL titles by team: {top}.")
             continue
+        if result["name"] == "team_seasons" and "finish" in cols and _has(text, *TITLE_WORDS):
+            won = [str(r[0]) for r in rows if r[cols.index("finish")] == "Champions"]
+            team = (result.get("args") or {}).get("team", "")
+            parts.append(f"{team} won {len(won)} IPL title{'s' if len(won) != 1 else ''}"
+                         + (f": {', '.join(won)}." if won else "."))
+            continue
         if cols[0] == "year" and str(rows[-1][0]) == "Total" and not years:
-            parts.append(f"{block['title']} — in all: {_describe(cols, rows[-1], 1)}.")
+            parts.append(f"{block['title']} — in all: {_describe(cols, rows[-1], 1, lead(cols))}.")
             continue
         if cols[0] == "year":
             chosen = next((r for r in rows if str(r[0]) in years), None)
@@ -447,7 +582,7 @@ def summary(results: list[dict[str, Any]], question: str = "") -> str:
                 lowest = column == "econ" or "lowest" in text
                 chosen = (min if lowest else max)(numeric, key=lambda r: r[cols.index(column)]) if numeric else None
             chosen = chosen or rows[-1]
-            parts.append(f"{block['title']}: {chosen[0]} — {_describe(cols, chosen, 1)}.")
+            parts.append(f"{block['title']}: {chosen[0]} — {_describe(cols, chosen, 1, lead(cols))}.")
             continue
         if len(rows) == 1 or cols[0] == "ground":
             parts.append(f"{block['title']}: {rows[0][0]} — {_describe(cols, rows[0], 1)}.")
@@ -488,11 +623,12 @@ Archive: every IPL match 2008 onwards, ball by ball.
 Examples:
 best death bowlers 2024 -> phase_leaders(phase=death, role=bowl, year=2024)
 compare Dhoni and Pant -> player_profile(MS Dhoni), player_profile(Rishabh Pant)
-Kohli against Bumrah -> batter_vs_bowler(Virat Kohli, Jasprit Bumrah)
+Kohli against Bumrah, or Bumrah vs Kohli -> batter_vs_bowler(batter=Virat Kohli, bowler=Jasprit Bumrah)
 who won IPL 2019 -> champions(year=2019) | how many titles has CSK won -> team_seasons(team=CSK)
 Bumrah's wickets -> player_profile(Jasprit Bumrah) | sixes hit in IPL 2024 -> season_summary(year=2024)
 highest total at the Kotla -> venue_stats(name=Kotla) | most runs 2008 to 2025 -> batting_leaders(year=2008-2025)
-Orange Cap = batting_leaders sort runs; Purple Cap = bowling_leaders sort wkts."""
+Orange Cap = batting_leaders sort runs; Purple Cap = bowling_leaders sort wkts; maximums = sixes; scalps = wickets.
+first six overs = powerplay, overs 16-20 = death (phase_leaders; "who bowled best" -> role=bowl). Keep the question's year."""
 
 
 def llm_plan(router: Any, question: str, history: list[dict[str, str]] | None = None) -> tuple[list[dict[str, Any]], str, str]:
@@ -520,9 +656,10 @@ def plan(question: str, entities: dict[str, Any], router: Any = None, history: l
         try:
             calls, provider, model = llm_plan(router, question, history)
             planner = f"{provider} ({model})"
-            calls, dropped = ground_calls(calls, question, entities, history)
-            if dropped:
-                note = f"Dropped LLM calls not grounded in the question: {'; '.join(dropped)}."
+            calls, dropped = ground_calls(calls, question, entities, history, index)
+            calls, invalid = _valid_calls(calls, index)
+            if dropped or invalid:
+                note = f"Dropped LLM calls not grounded in the question or not valid: {'; '.join(dropped + invalid)}."
         except RuntimeError as exc:
             note = f"LLM planner unavailable ({str(exc)[:100]})."
     if mode in ("hybrid", "rules"):
@@ -530,27 +667,98 @@ def plan(question: str, entities: dict[str, Any], router: Any = None, history: l
         if rule_calls and prefer_rules(calls, rule_calls):
             planner = "rules" if not calls else f"rules (over {planner})"
             calls = rule_calls
-    return calls, planner, note
+    return orient_matchups(calls, question, index), planner, note
+
+
+BOWLER_FIRST = re.compile(r"\b(bowling|bowled|bowls) (to|at)\b|\bagainst the bat of\b")
+BATTER_FIRST = re.compile(r"\b(facing|faced|faces|batting against|batted against|bats against)\b")
+
+
+def orient_matchups(calls: list[dict[str, Any]], question: str, index: PlayerIndex | None) -> list[dict[str, Any]]:
+    """Put the batter and bowler the right way round, whatever the word order ("Bumrah vs Kohli").
+    The wording decides when it says ("X bowling to Y", "X facing Y"); otherwise the player who bats
+    more than he bowls is the batter."""
+    if index is None:
+        return calls
+    text = question.casefold()
+    out = []
+    for call in calls:
+        args = dict(call.get("args") or {})
+        if call["name"] == "batter_vs_bowler" and args.get("batter") and args.get("bowler"):
+            batter, _ = index.lookup(str(args["batter"]))
+            bowler, _ = index.lookup(str(args["bowler"]))
+            if batter and bowler:
+                named = index.scan(question)[0]
+                first = named[0].player_id if named else None
+                if BOWLER_FIRST.search(text) and first is not None:
+                    swap = first == batter.player_id
+                elif BATTER_FIRST.search(text) and first is not None:
+                    swap = first == bowler.player_id
+                else:
+                    swap = bowler.bat_share > batter.bat_share + 0.15
+                if swap:
+                    args["batter"], args["bowler"] = args["bowler"], args["batter"]
+        out.append({**call, "args": args})
+    return out
+
+
+YEAR_TOOLS = {t["function"]["name"] for t in TOOLS if "year" in t["function"]["parameters"]["properties"]}
+
+
+def _valid_calls(calls: list[dict[str, Any]], index: PlayerIndex | None) -> tuple[list[dict[str, Any]], list[str]]:
+    """Drop calls the archive cannot run (a player name as a team, a bad sort). A name that is unknown or
+    shared stays: the answer says so, or asks which player."""
+    if index is None:
+        return calls, []
+    kept, invalid = [], []
+    for call in calls:
+        try:
+            to_argv(call, index)
+        except (UnknownPlayer, AmbiguousName):
+            pass
+        except PlanError as exc:
+            invalid.append(f"{call['name']} ({exc})")
+            continue
+        kept.append(call)
+    return kept, invalid
 
 
 def ground_calls(calls: list[dict[str, Any]], question: str, entities: dict[str, Any],
-                 history: list[dict[str, str]] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+                 history: list[dict[str, str]] | None = None,
+                 index: PlayerIndex | None = None) -> tuple[list[dict[str, Any]], list[str]]:
     """Keep only what the question supports: a player the planner names must be named in the question
     (or the recent conversation), and a year must be one the question states. The same idea as the
     numeric grounding check, applied to the plan."""
     context = _norm(" ".join([question, *(str(h.get("content", "")) for h in (history or [])[-4:]
                                           if h.get("role") != "assistant")]))
+    words = set(context.split())
+    named = {p.player_id for p in index.scan(context)[0]} if index else set()
     years = sorted(entities.get("years") or [])
     kept, dropped = [], []
     for call in calls:
         args = dict(call.get("args") or {})
-        names = [str(args[k]) for k in ("name", "batter", "bowler") if args.get(k)]
-        missing = [n for n in names if _norm(n).split() and _norm(n).split()[-1] not in context.split()]
+        player_keys = ("batter", "bowler") if call["name"] == "batter_vs_bowler" else \
+            ("name",) if call["name"] == "player_profile" else ()
+        missing = []
+        for key in player_keys:
+            if not args.get(key):
+                continue
+            tokens = _norm(str(args[key])).split()
+            player = index.lookup(str(args[key]))[0] if index else None
+            if tokens and tokens[-1] in words:
+                # "Pandya" alone is two players: keep the question's bare surname so the answer asks which one,
+                # instead of the first name the planner guessed.
+                if index and not set(tokens[:-1]) & words and index.lookup(tokens[-1])[0] is None:
+                    args[key] = tokens[-1]
+            elif not (player and player.player_id in named):   # "Rohit's runs" names Rohit Sharma by first name
+                missing.append(str(args[key]))
         if missing:
             dropped.append(f"{call['name']}({', '.join(missing)})")
             continue
         year = str(args.get("year") or "").strip()
-        if year and YEAR_PATTERN.match(year):
+        if not year and years and call["name"] in YEAR_TOOLS:
+            args["year"] = _year_arg(years)["year"]          # the planner dropped the question's year
+        elif year and YEAR_PATTERN.match(year):
             low, high = (int(p) for p in (year.split("-") + [year])[:2])
             if years and (low < years[0] or high > years[-1]):
                 args["year"] = _year_arg(years)["year"]   # the question's own year wins
@@ -570,8 +778,11 @@ def prefer_rules(llm_calls: list[dict[str, Any]], rule_calls: list[dict[str, Any
              for k, v in (c.get("args") or {}).items() if k in ("name", "batter", "bowler")}
     looked_at = {str(v).casefold() for c in llm_calls if c["name"] in player_tools
                  for k, v in (c.get("args") or {}).items() if k in ("name", "batter", "bowler")}
-    if named and not looked_at:
+    surnames = {n.split()[-1] for n in looked_at if n.split()}
+    if named and any(n.split()[-1] not in surnames for n in named if n.split()):
         return True                                   # the question names a player the LLM plan never looks at
+    if any(c["name"] == "batter_vs_bowler" for c in rule_calls) and not any(c["name"] == "batter_vs_bowler" for c in llm_calls):
+        return True                                   # "Narine vs Rohit" is a matchup, not two profiles
     same_tool = {c["name"] for c in llm_calls} == {c["name"] for c in rule_calls}
     return same_tool and len(rule_calls) > len(llm_calls)
 
@@ -579,13 +790,32 @@ def prefer_rules(llm_calls: list[dict[str, Any]], rule_calls: list[dict[str, Any
 BAT_WORDS = {"sixes": "sixes", "six": "sixes", "fours": "fours", "boundaries": "fours", "fifties": "fifties",
              "half centuries": "fifties", "half-centuries": "fifties", "hundreds": "hundreds", "centuries": "hundreds",
              "tons": "hundreds", "strike rate": "sr", "average": "avg", "highest score": "hs", "runs": "runs",
-             "orange cap": "runs", "run scorer": "runs", "run-scorer": "runs", "top scorer": "runs"}
+             "orange cap": "runs", "run scorer": "runs", "run-scorer": "runs", "top scorer": "runs",
+             "run getter": "runs", "aggregate": "runs", "maximums": "sixes", "maximum": "sixes", "six hitter": "sixes"}
 BOWL_WORDS = {"economy": "econ", "economical": "econ", "purple cap": "wkts", "wickets": "wkts",
-              "wicket taker": "wkts", "wicket-taker": "wkts", "four-wicket": "4w", "4 wicket": "4w"}
+              "wicket taker": "wkts", "wicket-taker": "wkts", "four-wicket": "4w", "4 wicket": "4w",
+              "scalps": "wkts", "dismissals": "wkts"}
+# Role words alone ("leading batter", "top bowler") mean the default sort; a specific word wins over them.
+GENERIC_BAT = ("batter", "batters", "batsman", "batsmen")
+GENERIC_BOWL = ("bowler", "bowlers")
 PHASES = {"powerplay": "powerplay", "power play": "powerplay", "middle overs": "middle", "death": "death",
           "death overs": "death", "slog": "death"}
+PHASE_OVERS = [(re.compile(r"\b(first|1st|opening) (six|6) overs\b|\bovers? 1 (to|and) 6\b"), "powerplay"),
+               (re.compile(r"\bovers? 7 (to|and) 15\b"), "middle"),
+               (re.compile(r"\bovers? 16 (to|and) 20\b|\b(last|final) (four|4|five|5) overs\b"), "death")]
 LEADER_WORDS = ("most", "top", "highest", "best", "leading", "lowest", "who has", "who hit", "who scored",
-                "who took", "orange cap", "purple cap", "leaderboard", "fewest")
+                "who took", "orange cap", "purple cap", "leaderboard", "fewest", "biggest")
+RECORD_WORDS = ("highest total", "highest team total", "biggest total", "fastest fifty", "fastest 50",
+                "best bowling figures", "best figures", "highest individual", "records", "in an innings",
+                "single innings", "in a single", "in one innings", "knock", "innings total", "team total",
+                "team score", "individual innings", "individual score")
+TITLE_WORDS = ("titles", "title", "trophy", "trophies", "championship", "championships", "champions",
+               "runner up", "runners up", "lifted")
+# Team names fans use. Only read as a team when not a place ("at Chennai" is the ground).
+TEAM_NAMES = {"chennai": "CSK", "super kings": "CSK", "mumbai": "MI", "kolkata": "KKR", "knight riders": "KKR",
+              "bengaluru": "RCB", "bangalore": "RCB", "royal challengers": "RCB", "hyderabad": "SRH",
+              "sunrisers": "SRH", "rajasthan": "RR", "royals": "RR", "punjab": "PBKS", "delhi": "DC",
+              "capitals": "DC", "gujarat": "GT", "titans": "GT", "lucknow": "LSG", "super giants": "LSG"}
 MATCH_WORDS = ("final", "qualifier", "eliminator", "match on", "scorecard", "ball by ball", "ball-by-ball",
                "commentary", "momentum", "this match", "that match", "the match")
 
@@ -600,36 +830,48 @@ def _year_arg(years: list[int]) -> dict[str, str]:
     return {"year": str(years[0]) if len(years) == 1 else f"{min(years)}-{max(years)}"}
 
 
+def _teams(text: str) -> list[str]:
+    """Teams named in this message: codes and full names, then city and short names that are not a place."""
+    teams, _ = _team_entities(text, fuzzy=False)
+    for name in sorted(TEAM_NAMES, key=len, reverse=True):
+        for match in re.finditer(rf"(?<![a-z]){re.escape(name)}(?![a-z])", text):
+            before = text[:match.start()].split()[-1:] or [""]
+            if before[0] not in ("at", "in", "the") and TEAM_NAMES[name] not in teams:
+                teams.append(TEAM_NAMES[name])
+    return teams
+
+
 def rule_plan(question: str, entities: dict[str, Any], index: PlayerIndex | None) -> list[dict[str, Any]]:
     """Keyword planner for when no LLM is available. Returns [] for the match path."""
     text = question.casefold().replace("-", " ")
-    teams, _ = _team_entities(text, fuzzy=False)       # only teams named in this message
+    teams = _teams(text)                                # only teams named in this message
     year = _year_arg(entities.get("years") or [])
     players, ambiguous = index.scan(question) if index else ([], [])
-    leader = _has(text, *LEADER_WORDS)
+    leader = _has(text, *LEADER_WORDS) or re.search(r"\brecord (team|individual|innings|score|total)", text) is not None
 
-    if _has(text, "who won the ipl", "won the ipl", "ipl champion", "champions", "titles", "title", "trophy", "trophies",
-            "runner up", "runners up") or re.search(r"who won (the )?ipl", text):
-        if teams and _has(text, "how many", "titles", "trophies"):
+    if _has(text, "who won the ipl", "won the ipl", "ipl champion", *TITLE_WORDS) or re.search(r"who won (the )?ipl", text):
+        if teams and _has(text, "how many", "number of", "count", *TITLE_WORDS):
             return [{"name": "team_seasons", "args": {"team": teams[0], **year}}]
         return [{"name": "champions", "args": year}]
     # One match: a final, a scorecard, a match on screen.
     if _has(text, *MATCH_WORDS) and not leader:
         return []
-    if len(players) >= 2 and _has(text, "against", "vs", "v", "versus", "facing", "faced"):
+    if len(players) >= 2 and _has(text, "against", "vs", "v", "versus", "facing", "faced", "bowling to", "bowled to"):
         return [{"name": "batter_vs_bowler", "args": {"batter": players[0].name, "bowler": players[1].name, **year}}]
     if len(players) >= 2 and _has(text, "compare", "better", "comparison"):
         return [{"name": "player_profile", "args": {"name": p.name, **year}} for p in players[:2]]
-    phase = next((PHASES[w] for w in sorted(PHASES, key=len, reverse=True) if _has(text, w)), None)
+    phase = next((PHASES[w] for w in sorted(PHASES, key=len, reverse=True) if _has(text, w)), None) \
+        or next((name for pattern, name in PHASE_OVERS if pattern.search(text)), None)
     if phase and (leader or _has(text, "bowler", "bowlers", "batter", "batters", "batsmen", "economy", "strike rate")):
-        role = "bowl" if _has(text, "bowler", "bowlers", "bowling", "economy", "economical", "wickets") else "bat"
+        role = "bowl" if _has(text, "bowler", "bowlers", "bowling", "bowled", "bowl", "economy", "economical",
+                              "wickets") else "bat"
         return [{"name": "phase_leaders", "args": {"phase": phase, "role": role, **year}}]
     if leader:
-        bowl = next((BOWL_WORDS[w] for w in sorted(BOWL_WORDS, key=len, reverse=True) if _has(text, w)), None)
-        bat = next((BAT_WORDS[w] for w in sorted(BAT_WORDS, key=len, reverse=True) if _has(text, w)), None)
-        if _has(text, "highest total", "highest team total", "biggest total", "fastest fifty", "fastest 50",
-                "best bowling figures", "best figures", "highest individual", "records", "in an innings",
-                "single innings", "in a single", "in one innings"):
+        bowl = next((BOWL_WORDS[w] for w in sorted(BOWL_WORDS, key=len, reverse=True) if _has(text, w)), None) \
+            or ("wkts" if _has(text, *GENERIC_BOWL) else None)
+        bat = next((BAT_WORDS[w] for w in sorted(BAT_WORDS, key=len, reverse=True) if _has(text, w)), None) \
+            or ("runs" if _has(text, *GENERIC_BAT) else None)
+        if _has(text, *RECORD_WORDS) or re.search(r"\brecord (team|individual|innings|score|total)", text):
             return [{"name": "records", "args": year}]
         team = {"team": teams[0]} if len(teams) == 1 else {}
         if bowl and not (bat and bat != "runs" and not _has(text, "bowler", "bowlers")):
@@ -639,13 +881,19 @@ def rule_plan(question: str, entities: dict[str, Any], index: PlayerIndex | None
     if len(teams) == 2 and _has(text, "head to head", "head-to-head", "h2h", "record", "how many times",
                                 "rivalry", "won more", "against"):
         return [{"name": "head_to_head", "args": {"team1": teams[0], "team2": teams[1], **year}}]
+    ground = next((g for g in sorted(GROUND_ALIASES, key=len, reverse=True) if _has(text, g)), "")
+    if ground and _has(text, "pitch", "conditions", "ground report", "report", "favour", "favor", "spin", "spinners",
+                       "pace", "seamers", "par", "nature", "character", "slow", "flat", "batting friendly",
+                       "bowling friendly", "how does it play", "play like"):
+        return [{"name": "ground_report", "args": {"name": GROUND_ALIASES[ground], **year}}]
     if _has(text, "stadium", "ground", "venue", "pitch at", "chasing at", "batting first at", *GROUND_ALIASES) \
             and _has(text, "average", "score", "chasing", "chase", "bat first", "batting first", "total", "stats", "record"):
         ground = next((g for g in sorted(GROUND_ALIASES, key=len, reverse=True) if _has(text, g)), "")
         return [{"name": "venue_stats", "args": {"name": GROUND_ALIASES.get(ground, ground), **year}}]
-    player_words = ("stats", "record", "career", "how many", "runs", "wickets", "perform", "performed", "season",
-                    "seasons", "strike rate", "economy", "average", "profile", "bowling", "batting", "numbers",
-                    "how did", "do in", "fared", "form")
+    player_words = ("stats", "record", "career", "how many", "runs", "wickets", "wicket", "perform", "performed",
+                    "season", "seasons", "strike rate", "sr", "economy", "average", "profile", "bowling", "batting",
+                    "numbers", "how did", "do in", "fared", "form", "tally", "count", "scalps", "dismissed", "score",
+                    "scores", "how fast", "total", "aggregate", *BAT_WORDS, *BOWL_WORDS)
     if len(players) == 1 and _has(text, *player_words):
         return [{"name": "player_profile", "args": {"name": players[0].name, **year}}]
     if not players and ambiguous and not teams and _has(text, *player_words):
