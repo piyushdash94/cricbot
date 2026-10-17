@@ -136,6 +136,7 @@ refusal rate, and how many out-of-scope questions ran IPL queries anyway.
 python -m backend.eval.run_qna --dataset backend/eval/qna_ipl_v2.jsonl --planner rules            # the app without LLM keys
 python -m backend.eval.run_qna --dataset backend/eval/qna_ipl_v2.jsonl --planner hybrid           # LLM plans, tables answer (~130k tokens)
 python -m backend.eval.run_qna --dataset backend/eval/qna_ipl_v2.jsonl --planner hybrid --answer  # the full app
+python -m backend.eval.build_qna_v2 --heldout                                                    # rebuild the v2 held-out set
 ```
 
 Runs save after every question, so a stopped run keeps what it finished.
@@ -170,3 +171,72 @@ What it found:
   Khan" as two profiles instead of the matchup, a 2024 death-overs question without the year.
 - A rule-fallback bug, fixed: a venue's `name` argument was treated as a player name, so the
   rules' venue plan overrode a correct LLM head-to-head plan for "Chennai against Mumbai".
+
+Completed baseline with the LLM planner (the remaining 43 questions ran on 18 Oct on the same
+pre-fix code): **61/88**, against 53/88 for rules.
+
+### After the v2 fixes, 18 Oct 2026
+
+What changed, one fix per finding:
+
+| Finding | Fix |
+|---|---|
+| Out-of-scope questions get IPL answers | `stats.out_of_scope` runs before planning: WPL/women's, Tests/ODIs/T20Is/World Cups, other leagues (BBL, PSL, CPL, SA20, CLT20...), auctions and pay, predictions and future seasons, personal details, live scores, other sports. The reply says what Pandit covers, with IPL questions to try, and runs no queries. |
+| First names not recognised; "Rashid" = AU Rashid | The player index also keys full first names ("rashid", "hardik", "suryakumar") and a short list of fan nicknames ("SKY", "Bhuvi", "ABD", "Jaddu"). The usual 3x-innings dominance rule decides; a shared first name ("Chris") is skipped rather than asked about, a shared surname still asks. |
+| Word order flips batter and bowler | `orient_matchups`: "X bowling to Y" and "X facing Y" decide when the question says; otherwise the player who bats more than he bowls is the batter. |
+| LLM misreads | Planner prompt: "Bumrah vs Kohli -> batter Kohli", maximums = sixes, scalps = wickets, first six overs = powerplay, overs 16-20 = death, keep the year. Plan grounding now restores a year the LLM dropped, keeps a bare shared surname bare (so the answer asks instead of guessing "Hardik"), accepts a player named by first name, and drops calls the archive cannot run (a player passed as a team). The hybrid prefers the rules plan when the LLM misses a matchup. |
+| Summary picks the wrong table | The batting or bowling table is chosen by what the question asks ("strike rate" is batting); the asked column is listed first so it is never cut; team title questions count the Champions rows. |
+| Paraphrases the rules missed | "run-getter", "maximums", "six-hitter", "scalps", "tally", "aggregate", "biggest", "record team score", "knock", "overs 16 to 20", "first six overs", "who bowled best", city and short team names ("Kolkata", "Knight Riders"; "at Chennai" stays a ground). |
+
+| Metric | Rules before | Rules after | LLM planner before | LLM planner after |
+|---|---|---|---|---|
+| Paraphrase questions answered correctly | 38/60 | 60/60 | 45/60 | 58/60 |
+| Groups right all three ways | 6/20 | 20/20 | 12/20 | 18/20 |
+| Groups with the same plan | 6/20 | 20/20 | n/a | 14/20 |
+| Entity accuracy | 37/56 | 56/56 | n/a | 56/56 |
+| Asks when the name is shared | 8/8 | 8/8 | 6/8 | 8/8 |
+| Answers when the name is clear | 3/8 | 8/8 | 6/8 | 8/8 |
+| Refuses out-of-scope questions | 4/12 | 12/12 | 4/12 | 12/12 |
+| All questions | 53/88 (60%) | 88/88 (100%) | 61/88 (69%) | 86/88 (98%) |
+
+"LLM planner before" for the first 45 questions comes from the run log, which did not record
+plans, so plan-based metrics are n/a. The two LLM misses after the fixes ("highest team total" planned as
+a run leaderboard, "most sixes in IPL 2024" as the season summary) were planned correctly in the
+earlier run: the same prompt at temperature 0 does not always give the same plan across Groq's
+models, which is what "same plan 14/20" measures.
+
+**These after-fix numbers are on the questions the fixes were made for**, so they say the fixes
+work, not how well Pandit generalises. That is what the held-out set below is for.
+
+### v2 held-out set (38 questions, `qna_ipl_v2_heldout.jsonl`)
+
+Written after the fixes, scored once before any further change: 8 new paraphrase groups (Gayle's
+sixes, Buttler 2022, champions 2010, Purple Cap 2013, KKR v SRH, Rohit v Narine, Chinnaswamy,
+Narine's economy), 3 new shared surnames (Chahar, Pathan, Marsh), 5 new clear names (Shubman,
+Ruturaj, Jaddu, Kuldeep, Mishra), 6 new kinds of off-topic question (SA20, a WPL player by name,
+Sachin's ODI strike rate, the T20 World Cup, a player's pay, the Champions League T20).
+"Mishra" was first labelled as shared; the archive has one dominant Mishra (Amit, 219 innings),
+so it was relabelled a clear name before the run.
+
+| Metric | Rules, first run | LLM planner, first run | Rules after the fixes below |
+|---|---|---|---|
+| Paraphrase questions answered correctly | 19/24 | 19/24 | 24/24 |
+| Groups right all three ways | 5/8 | 5/8 | 8/8 |
+| Entity accuracy | 22/26 | 24/26 | 25/26 |
+| Shared surnames asked | 3/3 | 3/3 | 3/3 |
+| Clear names answered | 5/5 | 5/5 | 5/5 |
+| Out of scope refused | 3/6 | 3/6 | 5/6 |
+| **All questions** | **30/38 (79%)** | **30/38 (79%)** | 37/38 (97%) |
+
+**79% is the honest number for unseen wordings.** The misses were general gaps, so they were
+fixed (and the set is now a development set; a new held-out set is needed for the next honest
+number): the asked column could be cut from a long summary row (Gayle's sixes were in the table,
+not in the sentence); "aggregate", "economical" and other stat words did not count as a question
+about one player; the LLM's matchup was lost to two profiles; an LLM call with a player name as
+a team failed instead of falling back; "paid" and "Champions League T20" were not in scope rules.
+
+Still open: an out-of-scope question that names only a non-IPL player ("Smriti Mandhana's highest
+score") has no scope word to catch, so it is answered with the IPL leaderboard. Fixing that needs
+"is this person in the archive?" before answering a person question, not more keywords.
+
+The v1 sets after these changes (rules): development 130/130, held-out 34/38 answers (89%; was 79%).

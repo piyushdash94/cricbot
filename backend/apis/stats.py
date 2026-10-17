@@ -125,6 +125,16 @@ def venues(name: str | None = Query(None, max_length=60), year: str | None = YEA
     return _run("venues", *([name] if name else []), *_opt("--year", year), "--limit", limit)
 
 
+@router.get("/grounds/{name}")
+def ground(name: str, year: str | None = YEAR()):
+    """One ground against the league in the same seasons (scoring by season, phases, how wickets fall)."""
+    from backend.agent.stats import GROUND_ALIASES
+
+    if not 2 <= len(name.strip()) <= 60:
+        raise HTTPException(422, "ground name must be 2-60 characters")
+    return _run("ground", GROUND_ALIASES.get(name.casefold().strip(), name), *_opt("--year", year))
+
+
 @router.get("/champions")
 def champions(year: str | None = YEAR()):
     return _run("champions", *_opt("--year", year))

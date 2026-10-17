@@ -268,9 +268,9 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .impact-list b { color:var(--green); font:600 13px var(--font-geist-mono); }
 
 /* ------------------------------------------------------------ drawers */
-.docs-drawer,.trace-panel { position:fixed; inset:0 0 0 auto; width:min(560px,100vw); z-index:40; display:flex; flex-direction:column; border-left:1px solid var(--line2); color:var(--ink); background:var(--canvas); box-shadow:-30px 0 80px rgba(0,0,0,.4); transform:translateX(102%); transition:transform .25s; }
+.docs-drawer,.trace-panel { position:fixed; inset:0 0 0 auto; width:min(560px,100vw); z-index:40; display:flex; flex-direction:column; border-left:1px solid var(--line2); color:var(--ink); background:var(--canvas); transform:translateX(102%); transition:transform .25s; }
 .trace-panel { width:min(440px,100vw); }
-.docs-drawer.open,.trace-panel.open { transform:translateX(0); }
+.docs-drawer.open,.trace-panel.open { transform:translateX(0); box-shadow:-30px 0 80px rgba(0,0,0,.4); }
 .docs-drawer>header,.trace-header { min-height:64px; padding:0 16px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--line); }
 .docs-drawer header>div,.trace-header>div { display:grid; }
 .docs-drawer header strong,.trace-header strong { font-size:15px; }
@@ -400,3 +400,42 @@ code { font:12px var(--font-geist-mono); }
 .chat-stats-more:hover { border-color:var(--green); color:var(--green); }
 .chat-stats table.ranked th:nth-child(2),.chat-stats table.ranked td:nth-child(2) { text-align:left; }
 .chat-stats table.ranked td:first-child { width:24px; color:var(--faint); }
+
+/* Stats tabs scroll sideways on narrow screens instead of squeezing labels. */
+.stats-panel .detail-tabs { overflow-x:auto; scrollbar-width:none; }
+.stats-panel .detail-tabs::-webkit-scrollbar { display:none; }
+.stats-panel .detail-tabs button { flex:1 0 auto; padding:0 12px; white-space:nowrap; }
+.stats-year select:disabled { opacity:.6; }
+.stats-controls { gap:10px; }
+.stats-controls label { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
+.stats-controls select { height:30px; padding:0 6px; border:1px solid var(--line2); border-radius:8px; color:var(--ink); background:var(--panel); font-size:12px; }
+.stats-pair input { flex:1 1 120px; }
+.stats-pair span { color:var(--muted); font-size:12px; }
+
+/* Ground report: the verdict, then par score by season against the league. */
+.ground-verdict { margin:0; padding:12px 14px; border:1px solid var(--line); border-left:3px solid var(--green); border-radius:10px; background:var(--panel); font-size:13px; line-height:1.55; }
+.par-chart { display:grid; gap:5px; }
+.par-row { display:grid; grid-template-columns:42px 1fr 52px 36px; align-items:center; gap:8px; font-size:12px; }
+.par-row>span { color:var(--muted); font-family:var(--font-geist-mono); }
+.par-row small { color:var(--faint); text-align:right; }
+.par-row b { text-align:right; font:600 12px var(--font-geist-mono); }
+.par-track { position:relative; height:12px; border-radius:3px; background:var(--panel2); }
+.par-track::after { content:""; position:absolute; left:50%; top:-2px; bottom:-2px; width:1px; background:var(--line2); }
+.par-track i { position:absolute; top:0; bottom:0; border-radius:3px; }
+.par-track i.up,.par-row b.up { background:var(--green); color:var(--green); }
+.par-track i.down,.par-row b.down { background:var(--amber); color:var(--amber); }
+.par-row b.up,.par-row b.down { background:none; }
+
+/* Chat: choices for an ambiguous name, and the out-of-scope notice. */
+.chat-choice,.chat-scope { display:grid; gap:8px; }
+.chat-choice h4,.chat-scope h4 { margin:0; display:flex; align-items:baseline; gap:6px; font-size:13px; }
+.chat-scope h4 small { color:var(--muted); font-weight:500; }
+.chat-scope h4 span { color:var(--amber); }
+.chat-scope { border-left:3px solid var(--amber); }
+.chat-chips { display:flex; flex-wrap:wrap; gap:6px; }
+.chat-chips button { padding:6px 10px; border:1px solid var(--line2); border-radius:99px; background:var(--panel2); color:var(--ink); font-size:12px; font-weight:600; }
+.chat-chips button:hover:not(:disabled) { border-color:var(--green); color:var(--green); }
+.chat-chips button:disabled { opacity:.5; }
+.stats-h2h select { min-width:0; max-width:100%; flex:0 1 auto; }
+.stats-card .card-title { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:4px 12px; }
+.stats-card .card-title small { color:var(--muted); font-size:11px; }

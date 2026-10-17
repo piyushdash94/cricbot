@@ -439,6 +439,94 @@ def venues(q: "Q", a: argparse.Namespace) -> None:
         ORDER BY matches DESC LIMIT $limit""")
 
 
+def ground_report(q: "Q", a: argparse.Namespace) -> None:
+    """One ground against the league in the same seasons: what scoring, phases and dismissals look like.
+
+    These are outcomes, not a pitch reading: they mix the surface with boundary size, dew, and who
+    played there. Comparing with the league in the same seasons removes the era (2008 is not 2024)."""
+    q.params["venue"] = a.name
+    found = q.rows("""
+        SELECT ground(venue) AS ground, count(*) AS n FROM matches
+        WHERE year(start_date) BETWEEN $y0 AND $y1
+          AND (ground(venue) ILIKE '%' || $venue || '%' OR venue ILIKE '%' || $venue || '%')
+        GROUP BY 1 ORDER BY n DESC LIMIT 1""")
+    if not found:
+        q.note(f"No IPL ground matching '{a.name}' {q.span}.")
+        return
+    name = found[0]["ground"]
+    q.params["g"] = name
+    inn = f"""inn AS (
+            SELECT match_id, inning, year, ground(any_value(venue)) AS ground, any_value(batting_team) AS team,
+                   sum(runs_total) AS runs, count(*) FILTER (WHERE is_legal) AS balls
+            FROM d WHERE {YEARS} GROUP BY match_id, inning, year),
+        games AS (
+            SELECT i1.match_id, i1.year, i1.ground, i1.runs AS first, i1.balls AS b1, i2.runs AS second, i2.balls AS b2,
+                   franchise(m.winner) = i2.team AS chased
+            FROM inn i1 JOIN matches m USING (match_id)
+            LEFT JOIN inn i2 ON i2.match_id = i1.match_id AND i2.inning = 2
+            WHERE i1.inning = 1)"""
+    q.table(f"{name}: scoring by season, against the league {q.span}", f"""
+        WITH {inn},
+        league AS (SELECT year, avg(first) AS l_first, 6.0 * sum(first + coalesce(second, 0)) / sum(b1 + coalesce(b2, 0)) AS l_rr
+                   FROM games GROUP BY year)
+        SELECT g.year, count(*) AS matches, round(avg(first), 1) AS avg_1st_inns, round(any_value(l_first), 1) AS league_1st,
+               round(avg(first) - any_value(l_first), 1) AS vs_league,
+               round(6.0 * sum(first + coalesce(second, 0)) / sum(b1 + coalesce(b2, 0)), 2) AS run_rate,
+               round(any_value(l_rr), 2) AS league_rr,
+               round(100.0 * count(*) FILTER (WHERE chased) / nullif(count(*) FILTER (WHERE second IS NOT NULL), 0), 0) AS chase_win_pct
+        FROM games g JOIN league l USING (year) WHERE g.ground = $g
+        GROUP BY ROLLUP (g.year) ORDER BY g.year NULLS LAST""")
+    rows = q.blocks[-1]["rows"]
+    if rows and rows[-1][0] is None:
+        rows[-1][0] = "Total"
+        cols = q.blocks[-1]["columns"]
+        total = dict(zip(cols, rows[-1]))
+        # The Total's league figures must be weighted by the seasons this ground hosted, not the overall average.
+        season_rows = [dict(zip(cols, r)) for r in rows[:-1]]
+        weight = sum(r["matches"] for r in season_rows) or 1
+        rows[-1][cols.index("league_1st")] = round(sum(r["league_1st"] * r["matches"] for r in season_rows) / weight, 1)
+        rows[-1][cols.index("vs_league")] = round(total["avg_1st_inns"] - rows[-1][cols.index("league_1st")], 1)
+        rows[-1][cols.index("league_rr")] = round(sum(r["league_rr"] * r["matches"] for r in season_rows) / weight, 2)
+    seasons = f"""years AS (SELECT DISTINCT year FROM d WHERE ground(venue) = $g AND {YEARS})"""
+    q.table(f"{name}: by phase, against the league in the same seasons {q.span}", f"""
+        WITH {seasons},
+        x AS (SELECT ground(venue) = $g AS here, phase, match_id, inning, is_legal, runs_total, is_four, is_six,
+                     runs_total = 0 AND is_legal AS dot, is_wicket AND bowler_wicket AS wkt
+              FROM d WHERE year IN (SELECT year FROM years)),
+        agg AS (SELECT here, phase, 6.0 * sum(runs_total) / count(*) FILTER (WHERE is_legal) AS rr,
+                       100.0 * count(*) FILTER (WHERE is_four OR is_six) / count(*) FILTER (WHERE is_legal) AS bdry,
+                       100.0 * count(*) FILTER (WHERE dot) / count(*) FILTER (WHERE is_legal) AS dots,
+                       count(*) FILTER (WHERE wkt) * 1.0 / count(DISTINCT (match_id, inning)) AS wkts
+                FROM x GROUP BY GROUPING SETS ((here, phase), (phase)))   -- here IS NULL: the whole league
+        SELECT h.phase, round(h.rr, 2) AS run_rate, round(l.rr, 2) AS league_rr,
+               round(h.bdry, 1) AS boundary_pct, round(l.bdry, 1) AS league_boundary_pct,
+               round(h.dots, 1) AS dot_pct, round(l.dots, 1) AS league_dot_pct,
+               round(h.wkts, 2) AS wkts_per_inns, round(l.wkts, 2) AS league_wkts
+        FROM agg h JOIN agg l ON l.phase = h.phase AND l.here IS NULL WHERE h.here
+        ORDER BY CASE h.phase WHEN 'powerplay' THEN 1 WHEN 'middle' THEN 2 ELSE 3 END""")
+    q.table(f"{name}: how wickets fall, against the league in the same seasons {q.span}", f"""
+        WITH {seasons},
+        w AS (SELECT ground(venue) = $g AS here,
+                     CASE WHEN dismissal_type IN ('caught', 'caught and bowled') THEN 'caught'
+                          WHEN dismissal_type IN ('bowled', 'lbw', 'stumped', 'run out') THEN dismissal_type
+                          ELSE 'other' END AS how
+              FROM d WHERE is_wicket AND year IN (SELECT year FROM years)),
+        share AS (SELECT here, how, 100.0 * count(*) / sum(count(*)) OVER (PARTITION BY here) AS pct
+                  FROM (SELECT here, how FROM w UNION ALL SELECT NULL, how FROM w) GROUP BY here, how)
+        SELECT h.how AS dismissal, round(h.pct, 1) AS pct, round(l.pct, 1) AS league_pct
+        FROM share h JOIN share l ON l.how = h.how AND l.here IS NULL WHERE h.here AND h.how <> 'other'
+        ORDER BY h.pct DESC""")
+    if rows and rows[-1][0] == "Total":
+        t = dict(zip(q.blocks[-3]["columns"], rows[-1]))
+        n = t["matches"]
+        diff = t["vs_league"]
+        lean = "about level with" if abs(diff) < 4 else (f"{diff} runs above" if diff > 0 else f"{-diff} runs below")
+        q.note(f"{name}: {n} matches {q.span}. First-innings scores average {t['avg_1st_inns']}, {lean} the league "
+               f"average in the same seasons ({t['league_1st']}); chasing sides won {t['chase_win_pct']:.0f}% of completed "
+               f"chases. These are outcomes, not a pitch reading: they mix the surface with boundary size, dew and "
+               f"the teams that played there." + (" Small sample: fewer than 10 matches." if n < 10 else ""))
+
+
 def champions(q: "Q", a: argparse.Namespace) -> None:
     q.table(f"IPL finals {q.span}", f"""
         SELECT year(start_date) AS year, franchise(winner) AS champion,
@@ -668,6 +756,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("bowler", help="name or player_id")
     p = cmd("venues", venues, "Grounds: average first innings, bat-first vs chasing wins, highest total")
     p.add_argument("name", nargs="?", help="part of the ground name, e.g. wankhede or kotla")
+    p = cmd("ground", ground_report, "One ground against the league: par score by season, phases, how wickets fall")
+    p.add_argument("name", help="part of the ground name, e.g. wankhede or chidambaram")
     cmd("champions", champions, "Every IPL final: champion, runner-up, result; titles by team", limit=20)
     p = cmd("team", team, "One team season by season: played, won, lost, how far they got", limit=100)
     p.add_argument("code", help="team code, e.g. CSK")

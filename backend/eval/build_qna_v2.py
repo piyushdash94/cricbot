@@ -30,6 +30,7 @@ from backend.agent.stats import db_path
 from .build_qna import FINALS, Archive, surname, team
 
 OUT = Path(__file__).with_name("qna_ipl_v2.jsonl")
+HELDOUT = Path(__file__).with_name("qna_ipl_v2_heldout.jsonl")
 REFUSAL = ["not in", "only cover", "only have", "only the ipl", "ipl only", "outside", "don't have", "do not have",
            "no data", "not available", "can't", "cannot", "couldn't find", "isn't in", "not part of", "not covered",
            "doesn't cover", "does not cover", "unable"]
@@ -188,12 +189,87 @@ def build(db: str) -> list[dict[str, Any]]:
     return items
 
 
+def build_heldout(db: str) -> list[dict[str, Any]]:
+    """37 new questions written after the v2 fixes and never used to tune them: new wordings, new
+    players, new shared surnames, new kinds of off-topic question. Scored once, as the honest number."""
+    a = Archive(db)
+    items: list[dict[str, Any]] = []
+
+    def group(gid: str, phrasings: list[str], checks: list[list[str]], verified: str, entities: dict[str, list],
+              tool: str, category: str) -> None:
+        for i, q in enumerate(phrasings, 1):
+            items.append(row(f"h-{gid}-{i}", q, "answer", category, checks, verified, gid, entities, tool))
+
+    def career(name: str, role: str) -> dict[str, Any]:
+        player = a.rows("players", name)[0]["player"]
+        return a.total("player", name, title=f"{player}: {'batting' if role == 'bat' else 'bowling'} by year")
+
+    def season(name: str, role: str, year: int, field: str) -> Any:
+        player = a.rows("players", name)[0]["player"]
+        title = f"{player}: {'batting' if role == 'bat' else 'bowling'} by year"
+        return next(r for r in a.rows("player", name, "--year", str(year), title=title) if str(r["year"]) == str(year))[field]
+
+    group("gayle-sixes", ["How many sixes has Chris Gayle hit in the IPL?", "Gayle's IPL maximums",
+                          "total sixes struck by Chris Gayle"],
+          [[str(career("Chris Gayle", "bat")["6s"])]], "archive", {"players": ["Chris Gayle"]}, "player_profile",
+          "Player career")
+    group("buttler-2022", ["Jos Buttler runs in IPL 2022", "how many did Buttler score in the 2022 season",
+                           "Buttler's 2022 IPL aggregate"],
+          [["863"]], "published", {"players": ["Jos Buttler"], "years": [2022]}, "player_profile", "Player season")
+    group("champ-2010", ["who were IPL champions in 2010", "2010 IPL title winner", "which team won the 2010 edition"],
+          [team(FINALS[2010][0])], "published", {"years": [2010]}, "champions", "Champions")
+    group("purple-2013", ["Purple Cap 2013", "most wickets in IPL 2013", "top wicket-taker of the 2013 season"],
+          [["Bravo"], ["32"]], "published", {"years": [2013]}, "bowling_leaders", "Season leader")
+    h2h = a.total("h2h", "KKR", "SRH")
+    won = {k.split()[0]: v for k, v in h2h.items() if k.endswith(" won")}
+    group("kkr-srh", ["KKR vs SRH head to head", "how many times have Kolkata beaten Hyderabad",
+                      "Sunrisers against Knight Riders record"],
+          [[str(won["KKR"])]], "archive", {"teams": ["KKR", "SRH"]}, "head_to_head", "Head to head")
+    m = a.total("matchup", "Rohit Sharma", "Sunil Narine")
+    group("rohit-narine", ["Rohit Sharma against Sunil Narine", "Narine vs Rohit",
+                           "Sunil Narine bowling to Rohit Sharma"],
+          [[str(m["runs"])], [str(m["balls"])]], "archive", {"players": ["Rohit Sharma", "Sunil Narine"]},
+          "batter_vs_bowler", "Batter v bowler")
+    venue = a.rows("venues", "chinnaswamy", "--limit", "1")[0]
+    group("chinnaswamy", ["average first innings score at Chinnaswamy", "Chinnaswamy: what's par batting first?",
+                          "typical first-innings total at the Bengaluru stadium"],
+          [[str(venue["avg_1st_inns"])]], "archive", {}, "venue_stats", "Venues")
+    group("narine-econ", ["Sunil Narine's IPL economy rate", "how economical has Narine been in the IPL",
+                          "Narine career economy"],
+          [[str(career("Sunil Narine", "bowl")["econ"])]], "archive", {"players": ["Sunil Narine"]}, "player_profile",
+          "Player career")
+
+    for qid, q, names in (("chahar", "Chahar's wickets in the IPL", ["Deepak Chahar", "Rahul Chahar"]),
+                          ("pathan", "How did Pathan do in 2010?", ["Yusuf Pathan", "Irfan Pathan"]),
+                          ("marsh", "Marsh's IPL runs", ["Shaun Marsh", "Mitchell Marsh"])):
+        items.append(row(f"h-clarify-{qid}", q, "clarify", "Ambiguous name", [names], "n/a"))
+    for qid, q, name, role, field, year in (("shubman", "Shubman's runs in 2023", "Shubman Gill", "bat", "runs", 2023),
+                                            ("ruturaj", "Ruturaj's runs in 2021", "Ruturaj Gaikwad", "bat", "runs", 2021),
+                                            ("jaddu", "Jaddu's IPL wickets", "Ravindra Jadeja", "bowl", "wkts", None),
+                                            ("kuldeep", "Kuldeep's IPL wickets", "Kuldeep Yadav", "bowl", "wkts", None),
+                                            ("mishra", "Mishra career economy", "Amit Mishra", "bowl", "econ", None)):
+        value = season(name, role, year, field) if year else career(name, role)[field]
+        items.append(row(f"h-clear-{qid}", q, "answer", "Clear name", [[surname(name)], [str(value)]], "archive",
+                         entities={"players": [name], **({"years": [year]} if year else {})}, tool="player_profile"))
+    for qid, q in (("sa20", "Who topped the run charts in SA20 2025?"),
+                   ("mandhana", "Smriti Mandhana's highest score"),
+                   ("sachin-odi", "What was Sachin Tendulkar's ODI strike rate?"),
+                   ("t20wc", "Who won the 2024 T20 World Cup?"),
+                   ("pay", "How much is Virat Kohli paid by RCB?"),
+                   ("clt20", "Which team won the Champions League T20 in 2014?")):
+        items.append(row(f"h-scope-{qid}", q, "refuse", "Out of scope", [REFUSAL], "n/a"))
+    return items
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", default=None)
     ap.add_argument("--out", default=str(OUT))
+    ap.add_argument("--heldout", action="store_true", help="write the held-out set instead")
     a = ap.parse_args(argv)
-    items = build(a.db or db_path())
+    items = (build_heldout if a.heldout else build)(a.db or db_path())
+    if a.heldout and a.out == str(OUT):
+        a.out = str(HELDOUT)
     assert len({i["id"] for i in items}) == len(items)
     with open(a.out, "w", encoding="utf-8") as fh:
         for item in items:

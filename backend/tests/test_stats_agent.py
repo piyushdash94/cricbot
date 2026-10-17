@@ -312,3 +312,150 @@ def test_a_venue_name_is_not_a_player_name():
     rules = [{"name": "venue_stats", "args": {"name": "Chidambaram"}}]
     assert not stats.prefer_rules(llm, rules)
     assert stats.prefer_rules([{"name": "batting_leaders", "args": {}}], [{"name": "player_profile", "args": {"name": "MS Dhoni"}}])
+
+
+# ----------------------------------------------------------------- v2 fixes
+
+def _index():
+    return stats.PlayerIndex.build([
+        stats.Player(1, "Virat Kohli", 300, 275, 26), stats.Player(2, "Jasprit Bumrah", 160, 40, 158),
+        stats.Player(3, "Rashid Khan", 150, 72, 153), stats.Player(4, "AU Rashid", 3, 1, 3),
+        stats.Player(5, "Hardik Pandya", 200, 150, 116), stats.Player(6, "Krunal Pandya", 150, 110, 120),
+        stats.Player(7, "Suryakumar Yadav", 165, 164, 1), stats.Player(8, "MS Dhoni", 250, 241, 0),
+        stats.Player(9, "Arun Karthik", 8, 8, 0)])
+
+
+def test_first_names_and_nicknames_resolve_but_shared_surnames_still_ask():
+    index = _index()
+    assert index.lookup("Rashid")[0].name == "Rashid Khan"            # AU Rashid has 3 innings
+    assert index.lookup("hardik")[0].name == "Hardik Pandya"
+    assert index.lookup("SKY")[0].name == "Suryakumar Yadav"
+    assert index.lookup("Pandya")[0] is None
+    found, ambiguous = index.scan("Suryakumar's runs in 2023 and Pandya's")
+    assert [p.name for p in found] == ["Suryakumar Yadav"] and ambiguous == ["pandya"]
+    assert index.scan("average first innings at the Arun Jaitley Stadium")[0] == []   # a ground, not a player
+
+
+@pytest.mark.parametrize("question, batter", [
+    ("Bumrah vs Kohli", "Virat Kohli"), ("Kohli against Bumrah", "Virat Kohli"),
+    ("Rashid Khan bowling to Dhoni", "MS Dhoni"), ("Dhoni facing Rashid Khan", "MS Dhoni"),
+])
+def test_matchups_put_the_batter_first_whatever_the_word_order(question, batter):
+    index = _index()
+    calls = stats.rule_plan(question, resolve_entities(question), index)
+    calls = stats.orient_matchups(calls, question, index)
+    assert calls[0]["name"] == "batter_vs_bowler" and calls[0]["args"]["batter"] == batter
+
+
+@pytest.mark.parametrize("question, topic", [
+    ("Who scored the most runs in WPL 2024?", "women"), ("What is Virat Kohli's Test batting average?", "international"),
+    ("PSL 2025 winner", "leagues"), ("How much did Rishabh Pant sell for in the IPL auction?", "auction"),
+    ("Who will win IPL 2027?", "predictions"), ("Which club has won the most ISL titles?", "sports"),
+])
+def test_out_of_scope_questions_are_named(question, topic):
+    assert topic in stats.out_of_scope(question)
+
+
+@pytest.mark.parametrize("question", [
+    "Who won IPL 2016?", "most sixes in IPL 2024", "Kohli against Bumrah", "average first innings at Wankhede",
+    "most runs by an overseas player", "What's the average score at Chepauk?", "Indian Premier League records",
+])
+def test_ipl_questions_are_in_scope(question):
+    assert stats.out_of_scope(question) is None
+
+
+def test_graph_refuses_out_of_scope_without_running_queries(db):
+    from backend.agent.service import CricbotAgent
+
+    result = CricbotAgent(llm=FakeRouter(fail_plan=True)).answer("Most wickets in the Big Bash League 2024")
+    assert "only have IPL" in result["reply"] and result["tool_calls"] == []
+    assert result["cards"][0]["type"] == "scope" and result["cards"][0]["suggestions"]
+
+
+def test_ambiguous_names_come_back_as_choices():
+    results = [{"name": "player_profile", "args": {"name": "Pandya"}, "error": "x", "ambiguous": "Pandya",
+                "choices": ["Hardik Pandya", "Krunal Pandya"], "blocks": []}]
+    card = stats.clarify_card(results, "Pandya's batting record in the IPL")
+    assert card["type"] == "clarify"
+    assert card["options"][0] == {"label": "Hardik Pandya", "question": "Hardik Pandya's batting record in the IPL"}
+
+
+def test_llm_plans_keep_the_question_year_and_do_not_guess_first_names():
+    index = _index()
+    q = "Pandya's batting record in the IPL"
+    kept, _ = stats.ground_calls([{"name": "player_profile", "args": {"name": "Hardik Pandya"}}], q,
+                                 resolve_entities(q), index=index)
+    assert kept[0]["args"]["name"] == "pandya"                        # the answer asks which Pandya
+    q = "Rohit's runs"                                                # first name only: still grounded
+    index = stats.PlayerIndex.build([stats.Player(1, "Rohit Sharma", 300, 276, 32)])
+    kept, dropped = stats.ground_calls([{"name": "player_profile", "args": {"name": "Rohit Sharma"}}], q,
+                                       resolve_entities(q), index=index)
+    assert kept and not dropped
+    q = "Best death-overs bowler in 2024"
+    kept, _ = stats.ground_calls([{"name": "phase_leaders", "args": {"phase": "death", "role": "bowl"}}], q,
+                                 resolve_entities(q))
+    assert kept[0]["args"]["year"] == "2024"
+
+
+@pytest.mark.parametrize("question, tool, args", [
+    ("who hit the most maximums in 2024", "batting_leaders", {"sort": "sixes", "year": "2024"}),
+    ("most economical bowler in the first six overs, 2023", "phase_leaders", {"phase": "powerplay", "role": "bowl"}),
+    ("top bowler in overs 16 to 20, 2024 season", "phase_leaders", {"phase": "death", "role": "bowl"}),
+    ("leading batter for Knight Riders, 2024", "batting_leaders", {"sort": "runs", "team": "KKR"}),
+    ("number of IPL championships for Mumbai", "team_seasons", {"team": "MI"}),
+    ("Chennai against Mumbai: the record", "head_to_head", {"team1": "CSK", "team2": "MI"}),
+    ("record individual innings in the IPL", "records", {}),
+    ("chasing at Chennai: average score", "venue_stats", {"name": "Chidambaram"}),
+])
+def test_rule_planner_reads_paraphrases(question, tool, args):
+    calls = stats.rule_plan(question, resolve_entities(question), None)
+    assert calls and calls[0]["name"] == tool
+    assert args.items() <= calls[0]["args"].items()
+
+
+def test_summary_answers_the_column_and_role_asked():
+    batting = {"type": "table", "title": "Andre Russell: batting by year", "columns": ["year", "runs", "sr"],
+               "rows": [[2024, 222, 185.0], ["Total", 2651, 174.18]]}
+    bowling = {"type": "table", "title": "Andre Russell: bowling by year", "columns": ["year", "wkts", "sr"],
+               "rows": [[2024, 19, 13.0], ["Total", 123, 14.7]]}
+    results = [{"name": "player_profile", "args": {}, "blocks": [bowling, batting]}]
+    assert "174.18" in stats.summary(results, "Andre Russell's IPL strike rate")
+    assert "123" in stats.summary(results, "Russell's wickets")
+    team = {"type": "table", "title": "MI season by season", "columns": ["year", "won", "finish"],
+            "rows": [[2013, 13, "Champions"], [2014, 7, "Playoffs"], [2015, 10, "Champions"], ["Total", 30, None]]}
+    reply = stats.summary([{"name": "team_seasons", "args": {"team": "MI"}, "blocks": [team]}], "MI trophy count")
+    assert reply.startswith("MI won 2 IPL titles: 2013, 2015")
+
+
+def test_hybrid_keeps_the_matchup_and_drops_invalid_llm_calls():
+    index = _index()
+    llm = [{"name": "player_profile", "args": {"name": "Jasprit Bumrah"}}]
+    rules = [{"name": "batter_vs_bowler", "args": {"batter": "Virat Kohli", "bowler": "Jasprit Bumrah"}}]
+    assert stats.prefer_rules(llm, rules)
+    kept, invalid = stats._valid_calls([{"name": "team_seasons", "args": {"team": "Narine"}},
+                                        {"name": "player_profile", "args": {"name": "Pandya"}}], index)
+    assert [c["name"] for c in kept] == ["player_profile"] and "unknown team" in invalid[0]
+
+
+def test_ground_report_compares_with_the_league(db):
+    blocks = queries.run(["ground", "uppal"], db=db)          # the fixture: one match at Hyderabad
+    tables = [b for b in blocks if b["type"] == "table"]
+    assert len(tables) == 3 and tables[0]["rows"][-1][0] == "Total"
+    assert {"avg_1st_inns", "league_1st", "vs_league", "chase_win_pct"} <= set(tables[0]["columns"])
+    assert [r[0] for r in tables[1]["rows"]] == ["powerplay", "middle", "death"]
+    assert "not a pitch reading" in blocks[-1]["text"]
+    assert queries.run(["ground", "nowhere"], db=db)[0]["text"].startswith("No IPL ground")
+    calls = stats.rule_plan("what is the pitch like at Chepauk?", {}, None)
+    assert calls == [{"name": "ground_report", "args": {"name": "Chidambaram"}}]
+
+
+def test_graph_answers_an_ambiguous_name_with_choices(db, monkeypatch):
+    from backend.agent.service import CricbotAgent
+
+    index = stats.PlayerIndex.build([stats.Player(1, "Hardik Pandya", 200, 150, 116),
+                                     stats.Player(2, "Krunal Pandya", 150, 110, 120)])
+    monkeypatch.setattr(stats, "player_index", lambda: index)
+    result = CricbotAgent(llm=FakeRouter(fail_plan=True)).answer("Pandya's batting record in the IPL")
+    assert [c["type"] for c in result["cards"]] == ["clarify"]
+    assert [o["label"] for o in result["cards"][0]["options"]] == ["Hardik Pandya", "Krunal Pandya"]
+    assert "which one" in result["reply"]

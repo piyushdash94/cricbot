@@ -144,7 +144,7 @@ class CricbotAgent:
         workflow.add_conditional_edges(
             "plan_question",
             lambda state: state["route"],
-            {"stats": "run_stats", "match": "route_tools"},
+            {"stats": "run_stats", "match": "route_tools", "scope": "plan_ui"},
         )
         workflow.add_edge("run_stats", "plan_ui")
         workflow.add_edge("route_tools", "retrieve_facts")
@@ -275,6 +275,13 @@ class CricbotAgent:
         except Exception as exc:                          # a broken archive must not break chat
             return {"route": "match", "planner": "none", "stats_calls": [],
                     "intermediate_message": f"Stats archive unavailable ({str(exc)[:120]})."}
+        topic = stats.out_of_scope(query)
+        if topic:
+            return {"route": "scope", "planner": "scope guard", "stats_calls": [], "results": [],
+                    "compact_results": "", "match_target": None,
+                    "cards": [{"type": "scope", "title": "Outside the IPL archive", "topic": topic,
+                               "suggestions": stats.SCOPE_SUGGESTIONS}],
+                    "intermediate_message": f"Out of scope ({topic}); answering with what the archive covers."}
         calls, planner, note = stats.plan(query, state.get("entities", {}), self.llm, state.get("history"), index,
                                           mode=os.environ.get("PANDIT_PLANNER", "hybrid"))
         route = "stats" if calls else "match"
@@ -294,7 +301,9 @@ class CricbotAgent:
         return {
             "stats_results": results,
             "compact_results": facts,
-            "cards": [stats.card(results, state["query"])],
+            # An ambiguous name is answered with choices; the stats card only when there is a table to show.
+            "cards": [card for card in (stats.clarify_card(results, state["query"]),
+                                        stats.card(results, state["query"]) if tables else None) if card],
             "results": [],
             "match_target": None,
             "intermediate_message": f"Ran {len(results)} archive quer{'y' if len(results) == 1 else 'ies'}: {tables} table{'s' if tables != 1 else ''}"
@@ -365,6 +374,9 @@ class CricbotAgent:
         }
 
     def _plan_ui(self, state: PanditState) -> PanditState:
+        if state.get("route") == "scope":
+            return {"actions": [], "response_route": "exact",
+                    "intermediate_message": "Out-of-scope question: fixed reply, no queries."}
         if state.get("route") == "stats":
             return {"actions": [], "response_route": "model",
                     "intermediate_message": "Stats answer: no dashboard change; routed to model response."}
@@ -422,6 +434,8 @@ class CricbotAgent:
         }
 
     def _grounded_fallback(self, state: PanditState) -> str:
+        if state.get("route") == "scope":
+            return stats.scope_reply(state["cards"][0]["topic"])
         if state.get("route") == "stats":
             return stats.summary(state.get("stats_results", []), state.get("query", ""))
         cards = state.get("cards") or []
@@ -430,6 +444,8 @@ class CricbotAgent:
         return self._fallback_reply(state["query"], state.get("results", []), state.get("entities"))
 
     def _finalize(self, state: PanditState) -> PanditState:
+        if state.get("route") == "scope":
+            return {"tool_calls": [], "intermediate_message": "Out-of-scope reply packaged for the UI."}
         if state.get("route") == "stats":
             return {
                 "tool_calls": [

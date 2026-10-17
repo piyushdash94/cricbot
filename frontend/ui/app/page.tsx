@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { StatsChatCard, StatsPanel } from "./stats";
-import type { StatsCard } from "./stats";
+import { ClarifyChatCard, ScopeChatCard, StatsChatCard, StatsPanel } from "./stats";
+import type { StatsCard, ClarifyCard, ScopeCard } from "./stats";
 
 // ---------------------------------------------------------------- contracts
 
@@ -50,7 +50,7 @@ type MatchCard = {
   coverage: { level: string; label: string }; consistency: { status: string; note: string }; ball_count: number; commentary_count: number;
 };
 type ListCard = { type: "match_list"; title: string; matches: { title: string; subtitle: string; meta: string; date: string; label: string; series_slug: string; match_slug: string }[] };
-type ChatCard = MatchCard | ListCard | StatsCard;
+type ChatCard = MatchCard | ListCard | StatsCard | ClarifyCard | ScopeCard;
 type ChatMessage = { role: "user" | "assistant"; content: string; cards?: ChatCard[]; via?: string };
 type GraphNode = { id: string; label: string; kind: string; description: string };
 type AgentGraph = { name: string; version: string; framework: string; nodes: GraphNode[]; edges: { from: string; to: string; condition?: string }[] };
@@ -439,7 +439,7 @@ export default function Home() {
   const llmLabel = agent?.provider ? `${agent.provider} · ${agent.model}` : agent ? "LLM offline · grounded recaps" : "Checking model…";
   const suggestions = selected
     ? ["Where did this match turn?", "Summarise the chase", "Who bowled the best spell?", "What happened in the last over?"]
-    : [`Tell me about the ${season} final`, `Show all RCB matches in ${season}`, "Where did the 2024 final turn?"];
+    : [`Tell me about the ${season} final`, `Most sixes in IPL ${season}`, "Kohli against Bumrah", "What's the pitch like at Chepauk?"];
 
   return (
     <div className={`app ${dark ? "dark" : "light"} view-${mobileView}${selected ? " has-match" : ""}${showStats ? " stats-open" : ""}`}>
@@ -490,7 +490,11 @@ export default function Home() {
                 ? <MatchChatCard key={cardIndex} card={card} onOpen={(tab) => openBySlugs(card.match.series_slug, card.match.match_slug, tab)} />
                 : card.type === "stats"
                   ? <StatsChatCard key={cardIndex} card={card} onOpenStats={openStats} />
-                  : <ListChatCard key={cardIndex} card={card} onOpen={(item) => openBySlugs(item.series_slug, item.match_slug)} />)}
+                  : card.type === "clarify"
+                    ? <ClarifyChatCard key={cardIndex} card={card} disabled={chatLoading} onAsk={(question) => void sendChat(undefined, question)} />
+                    : card.type === "scope"
+                      ? <ScopeChatCard key={cardIndex} card={card} disabled={chatLoading} onAsk={(question) => void sendChat(undefined, question)} />
+                      : <ListChatCard key={cardIndex} card={card} onOpen={(item) => openBySlugs(item.series_slug, item.match_slug)} />)}
               {message.via && <small className="via">{message.via}</small>}
             </div>
           </div>)}
