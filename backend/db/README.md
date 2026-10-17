@@ -53,7 +53,14 @@ Delhi Daredevils and Capitals, DCH for Deccan Chargers).
 ```bash
 python -m backend.db.queries seasons                       # which years are loaded + scoring trends
 python -m backend.db.queries top-batters --year 2025       # or --year 2016-2018, or omit for all time
+python -m backend.db.queries top-batters --year 2024 --sort sixes          # runs, sr, avg, sixes, fours, fifties, hundreds, hs
+python -m backend.db.queries top-batters --year 2023 --team CSK            # one team's leaders
 python -m backend.db.queries top-bowlers --year 2025
+python -m backend.db.queries top-bowlers --sort econ                       # wkts, econ, avg, sr, 4w (rate sorts apply a minimum)
+python -m backend.db.queries matchup "virat kohli" "jasprit bumrah"        # one batter against one bowler
+python -m backend.db.queries venues wankhede                               # avg 1st innings, bat-first vs chasing wins
+python -m backend.db.queries champions                                     # every final, titles by team
+python -m backend.db.queries team RCB                                      # season by season, how far they got
 python -m backend.db.queries players bumrah                # find a player_id
 python -m backend.db.queries player "virat kohli"          # by year and by phase
 python -m backend.db.queries phase death --role bowl --year 2024
@@ -67,7 +74,12 @@ python -m backend.db.queries sql "SELECT phase, count(*) FILTER (WHERE is_six) A
 
 Every command takes `--limit N` and `--csv file.csv`. The same commands are served as JSON
 by `backend/apis/stats.py` (`/api/stats/batting`, `/bowling`, `/records`, `/phase`,
-`/players`, `/players/{id}`, `/h2h`, `/seasons`, `/status`).
+`/players`, `/players/{id}`, `/h2h`, `/matchup`, `/venues`, `/champions`, `/teams/{code}`,
+`/seasons`, `/status`), and Pandit answers chat questions with them (`backend/agent/stats.py`).
+
+Grounds are merged across renames (Feroz Shah Kotla is Arun Jaitley Stadium, Motera is Narendra
+Modi Stadium). Player names can be full names even where Cricsheet uses initials ("Jofra
+Archer" finds "JC Archer").
 
 **Checked against published records:** the top run-scorer and top wicket-taker of every
 season from 2008 to 2025 (36 of 36) match, e.g. Kohli 973 in 2016, Gill 890 in 2023,

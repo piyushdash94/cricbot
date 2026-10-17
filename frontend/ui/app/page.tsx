@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { StatsPanel } from "./stats";
+import { StatsChatCard, StatsPanel } from "./stats";
+import type { StatsCard } from "./stats";
 
 // ---------------------------------------------------------------- contracts
 
@@ -49,7 +50,7 @@ type MatchCard = {
   coverage: { level: string; label: string }; consistency: { status: string; note: string }; ball_count: number; commentary_count: number;
 };
 type ListCard = { type: "match_list"; title: string; matches: { title: string; subtitle: string; meta: string; date: string; label: string; series_slug: string; match_slug: string }[] };
-type ChatCard = MatchCard | ListCard;
+type ChatCard = MatchCard | ListCard | StatsCard;
 type ChatMessage = { role: "user" | "assistant"; content: string; cards?: ChatCard[]; via?: string };
 type GraphNode = { id: string; label: string; kind: string; description: string };
 type AgentGraph = { name: string; version: string; framework: string; nodes: GraphNode[]; edges: { from: string; to: string; condition?: string }[] };
@@ -79,10 +80,12 @@ const TABS: { id: MatchTab; label: string }[] = [
   { id: "balls", label: "Ball by ball" }, { id: "momentum", label: "Momentum" },
 ];
 const DEFAULT_GRAPH: AgentGraph = {
-  name: "Pandit Cricket Assistant", version: "2.0", framework: "LangGraph",
+  name: "Pandit Cricket Assistant", version: "2.1", framework: "LangGraph",
   nodes: [
     ["normalize_request", "Understand request", "input", "Normalize the question, visible match, and recent conversation."],
     ["extract_entities", "Resolve cricket entities", "entity", "Correct typos and resolve teams, players, years, stages, and venues."],
+    ["plan_question", "Plan the question", "routing", "One match, or stats across matches? For stats, choose archive queries."],
+    ["run_stats", "Query stats archive", "tool", "Run the chosen DuckDB queries: leaders, players, matchups, records, teams."],
     ["route_tools", "Select tools", "routing", "Choose which archive searches to run."],
     ["retrieve_facts", "Retrieve cricket facts", "tool", "Search the match archive for the resolved teams and seasons."],
     ["load_match", "Load match data", "tool", "Fetch scorecard, ball-by-ball, and commentary for the match."],
@@ -200,6 +203,7 @@ export default function Home() {
   const [mobileView, setMobileView] = useState<"chat" | "matches" | "match" | "stats">("chat");
   // Stats opens the workspace on demand (like a match does); it can sit over an open match.
   const [showStats, setShowStats] = useState(false);
+  const openStats = useCallback(() => { setShowStats(true); setMobileView("stats"); }, []);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -443,7 +447,7 @@ export default function Home() {
         <div className="rail-head">
           <button className="brand" onClick={() => setMobileView("chat")}><span className="brand-mark" /><span>CRIC<span>BOT</span></span></button>
           <div className="rail-actions">
-            <button className={`icon-button${showStats ? " active" : ""}`} onClick={() => { setShowStats(true); setMobileView("stats"); }} aria-label="Open IPL stats" title="IPL stats">∑</button>
+            <button className={`icon-button${showStats ? " active" : ""}`} onClick={openStats} aria-label="Open IPL stats" title="IPL stats">∑</button>
             <button className="icon-button" onClick={() => setDocsOpen(true)} aria-label="Open documentation">≡</button>
             <button className="icon-button" onClick={() => setDark((value) => !value)} aria-label="Toggle color theme">{dark ? "☼" : "☾"}</button>
           </div>
@@ -484,7 +488,9 @@ export default function Home() {
               <p>{message.content}</p>
               {message.cards?.map((card, cardIndex) => card.type === "match"
                 ? <MatchChatCard key={cardIndex} card={card} onOpen={(tab) => openBySlugs(card.match.series_slug, card.match.match_slug, tab)} />
-                : <ListChatCard key={cardIndex} card={card} onOpen={(item) => openBySlugs(item.series_slug, item.match_slug)} />)}
+                : card.type === "stats"
+                  ? <StatsChatCard key={cardIndex} card={card} onOpenStats={openStats} />
+                  : <ListChatCard key={cardIndex} card={card} onOpen={(item) => openBySlugs(item.series_slug, item.match_slug)} />)}
               {message.via && <small className="via">{message.via}</small>}
             </div>
           </div>)}

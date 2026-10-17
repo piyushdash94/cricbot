@@ -28,6 +28,10 @@ const LABELS: Record<string, string> = {
   overs: "O", econ: "Econ", best: "Best", balls: "B", dot_pct: "Dot %", boundaries: "4s+6s", year: "Year",
   score: "Score", figures: "Figures", match: "Match", match_id: "Match id", balls_to_50: "Balls to 50", played: "P",
   no_result: "NR", phase: "Phase", first: "First", last: "Last", bat_inns: "Bat inns", bowl_inns: "Bowl inns", player_id: "Id",
+  won: "W", lost: "L", win_pct: "Win %", finish: "Finish", champion: "Champion", runner_up: "Runner-up", result: "Result",
+  ground: "Ground", titles: "Titles", years: "Years", avg_1st_inns: "Avg 1st inns", bat_first_won: "Won bat 1st",
+  chasing_won: "Won chasing", highest_total: "Highest", run_rate: "RR", matches: "M", with_balls: "With balls",
+  avg_1st: "Avg 1st", sixes: "6s", "4w+": "4w+",
 };
 
 async function getBlocks(path: string): Promise<Block[]> {
@@ -93,6 +97,45 @@ function Blocks({ path, onPlayer, compact }: { path: string | null; onPlayer?: (
   if (loading && !blocks) return <div className="detail-loading"><span /><strong>Crunching the numbers…</strong></div>;
   if (error) return <div className="error-state"><strong>Stats unavailable</strong><p>{error}</p></div>;
   return <div className={`scorecard-stack${loading ? " stats-refreshing" : ""}`}>{blocks?.map((block, index) => <BlockCard key={index} block={block} onPlayer={onPlayer} compact={compact} />)}</div>;
+}
+
+// ------------------------------------------------------------------ chat card
+
+// Pandit's stats answers carry the tables they were built from, so every number in the reply
+// can be checked in place. Long tables start collapsed.
+export type StatsCard = {
+  type: "stats"; title: string; question: string; blocks: Block[];
+  calls: { name: string; args: Record<string, unknown>; command: string; error: string | null }[];
+};
+const CHAT_ROWS = 5;
+
+function ChatTable({ block }: { block: Extract<Block, { type: "table" }> }) {
+  const [open, setOpen] = useState(false);
+  // Year-by-year tables end with a Total row: collapsed, show the latest seasons and the total.
+  const totalled = String(block.rows[block.rows.length - 1]?.[0]) === "Total";
+  const rows = open ? block.rows : totalled ? block.rows.slice(-CHAT_ROWS) : block.rows.slice(0, CHAT_ROWS);
+  const ranked = ["player", "team", "ground"].includes(block.columns[0]) && block.rows.length > 1;
+  return <div className="chat-stats-table">
+    <h4>{block.title}</h4>
+    {block.rows.length === 0 ? <p className="stats-note">No rows.</p> : <div className="table-wrap"><table className={ranked ? "ranked" : undefined}>
+      <thead><tr>{ranked && <th>#</th>}{block.columns.filter((c) => c !== "match_id").map((column) => <th key={column}>{LABELS[column] ?? column}</th>)}</tr></thead>
+      <tbody>{rows.map((row, index) => <tr key={index}>{ranked && <td>{index + 1}</td>}
+        {row.filter((_, col) => block.columns[col] !== "match_id").map((value, col) => <td key={col}>{col === 0 ? <strong>{cell(value)}</strong> : cell(value)}</td>)}</tr>)}</tbody>
+    </table></div>}
+    {block.rows.length > CHAT_ROWS && <button className="chat-stats-more" onClick={() => setOpen(!open)}>{open ? "Show fewer" : `Show all ${block.rows.length} rows`}</button>}
+  </div>;
+}
+
+export function StatsChatCard({ card, onOpenStats }: { card: StatsCard; onOpenStats?: () => void }) {
+  return <article className="chat-card chat-stats">
+    {card.blocks.map((block, index) => block.type === "text"
+      ? <p key={index} className="stats-note">{block.text}</p>
+      : <ChatTable key={index} block={block} />)}
+    <footer>
+      <small title={card.calls.map((call) => call.command).join("\n")}>From the ball-by-ball archive · {card.calls.map((call) => call.name.replace(/_/g, " ")).join(", ")}</small>
+      {onOpenStats && <div><button onClick={onOpenStats}>Open Stats</button></div>}
+    </footer>
+  </article>;
 }
 
 // ------------------------------------------------------------------ panel

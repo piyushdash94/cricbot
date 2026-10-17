@@ -57,7 +57,18 @@ Pandit's LLM keys live in `backend/.env` (git-ignored, loaded at startup; shell 
 cp backend/.env.example backend/.env   # then set GROQ_API_KEY and OPENROUTER_API_KEY
 ```
 
-Providers are tried in `LLM_PROVIDERS` order (default `groq,openrouter,gemma`); models are set with `GROQ_MODEL` and `OPENROUTER_MODEL`. The LLM only summarises facts Pandit retrieved. If no provider answers, or an answer contains a number that is not in the facts, Pandit replies with a grounded recap instead. `GET /api/agent/status` shows which provider is live.
+Providers are tried in `LLM_PROVIDERS` order (default `groq,openrouter,gemma`); models are set with `GROQ_MODEL` (answers; default `openai/gpt-oss-120b,qwen/qwen3.8-27b`), `GROQ_PLAN_MODEL` (picks stats queries; default `openai/gpt-oss-20b,qwen/qwen3.8-27b,openai/gpt-oss-120b`) and `OPENROUTER_MODEL`. Groq's free tier limits each model separately (8k tokens a minute, 200k a day, roughly 80-100 questions), so the settings are lists: a rate-limited model hands over to the next one before Pandit falls back to OpenRouter. The LLM never invents data: it picks verified queries and summarises what they return. If no provider answers, or an answer contains a number that is not in the facts, Pandit replies with a grounded recap instead. `GET /api/agent/status` shows which provider is live.
+
+### Asking Pandit about stats
+
+With the stats archive built (below), Pandit answers questions across matches as well as about one match:
+
+- "Who hit the most sixes in IPL 2024?", "Purple Cap 2013?", "most economical bowler for MI"
+- "How has Kohli done against Bumrah?", "Compare Dhoni and Pant as batters"
+- "How many titles have CSK won?", "How did RCB do in 2025?", "MI vs CSK head to head"
+- "Best death bowlers in 2024", "Average first innings score at Chepauk", "Highest team total ever"
+
+The planner (LLM tool calling, with keyword rules as fallback) chooses archive queries, the tables appear under the answer, and the trace pane shows the plan and the commands. Single-match questions ("Where did the 2025 final turn?") still open the match. Accuracy is measured on a 130-question set plus a 43-question held-out set in [`backend/eval`](backend/eval/README.md).
 
 ### Ball-by-ball data (recommended)
 
@@ -85,7 +96,7 @@ The Stats view (the **∑** button, or **Stats** on mobile) and `/api/stats/*` r
 python -m backend.db.cricsheet_load --sync     # ~20 s: downloads Cricsheet and loads every IPL delivery
 ```
 
-It covers season and all-time leaders, records, powerplay / middle / death splits, player profiles and head to head. Optionally, `python -m backend.db.ingest` adds ESPN commentary and the official scorecard for cross-checking. Details, schema and accuracy checks are in [`backend/db/README.md`](backend/db/README.md).
+It covers season and all-time leaders (any sort, any team), records, powerplay / middle / death splits, player profiles, batter v bowler, venues, champions, team seasons and head to head. Optionally, `python -m backend.db.ingest` adds ESPN commentary and the official scorecard for cross-checking. Details, schema and accuracy checks are in [`backend/db/README.md`](backend/db/README.md).
 
 ### Frontend
 
@@ -198,7 +209,9 @@ print(build_compact_scorecard(
 | `backend/agent/tools.py` | LangChain search tools and deterministic query routing |
 | `backend/agent/entities.py` | Team/player/year/venue extraction, typo correction, temporal resolution, and conversational carry-over |
 | `backend/agent/service.py` | LangGraph state, nodes, trace events, grounded responses, and UI actions |
-| `backend/agent/llm.py` | Groq/OpenRouter/Gemma provider chain and `.env` loading |
+| `backend/agent/llm.py` | Groq/OpenRouter/Gemma provider chain, tool-call planning and `.env` loading |
+| `backend/agent/stats.py` | Stats questions: tool specs, planner (LLM + keyword rules), player index, query runner, facts and chat card |
+| `backend/eval/` | IPL question-answer evaluation set and runner |
 | `backend/agent/match_facts.py` | Facts sheet (for the LLM) and chat card (for the UI) for a resolved match |
 | `backend/agent/gemma.py` | Local Gemma `/v1/completions` client and readiness checks |
 | `backend/apis/main.py` | FastAPI application and provider routes |
@@ -214,6 +227,7 @@ python backend/tests/test_ball_sources.py
 python backend/tests/test_cricsheet_scorecard.py
 python backend/tests/test_momentum_shifts.py
 python backend/tests/test_llm.py
+python -m pytest backend/tests          # everything, including the DuckDB and stats-chat tests
 
 cd frontend/ui
 npm test

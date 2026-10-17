@@ -387,3 +387,16 @@ code { font:12px var(--font-geist-mono); }
 .stats-back { margin-bottom:10px; }
 @media (max-width:760px) { .stats-year .coverage { margin-left:0; } }
 @media (prefers-reduced-motion:reduce) { * { transition:none !important; animation:none !important; } }
+
+/* Stats answers in the chat: the tables behind Pandit's reply. */
+.chat-stats { gap:12px; }
+.chat-stats-table { display:grid; gap:6px; min-width:0; }
+.chat-stats-table h4 { margin:0; font-size:13px; }
+.chat-stats .table-wrap { border:1px solid var(--line); border-radius:9px; }
+.chat-stats .table-wrap td:first-child { min-width:0; }
+.chat-stats .table-wrap td strong { white-space:nowrap; }
+.chat-stats .table-wrap th,.chat-stats .table-wrap td { padding:6px 8px; white-space:nowrap; }
+.chat-stats-more { justify-self:start; padding:4px 8px; border:1px solid var(--line2); border-radius:7px; background:var(--panel2); font-size:12px; font-weight:700; }
+.chat-stats-more:hover { border-color:var(--green); color:var(--green); }
+.chat-stats table.ranked th:nth-child(2),.chat-stats table.ranked td:nth-child(2) { text-align:left; }
+.chat-stats table.ranked td:first-child { width:24px; color:var(--faint); }

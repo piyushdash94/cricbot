@@ -27,6 +27,10 @@ def TEAM():  # noqa: N802
     return Query(..., pattern=r"^[A-Za-z]{2,6}$", description="Team code, e.g. MI, CSK, PBKS")
 
 
+def TEAM_FILTER():  # noqa: N802
+    return Query(None, pattern=r"^[A-Za-z]{2,6}$", description="Only this team, e.g. CSK")
+
+
 def db_path() -> str:
     return os.environ.get("CRICBOT_DB") or str(store.DEFAULT_DB)
 
@@ -71,13 +75,17 @@ def seasons():
 
 
 @router.get("/batting")
-def batting(year: str | None = YEAR(), limit: int = Query(15, ge=1, le=100), min_balls: int = Query(0, ge=0)):
-    return _run("top-batters", *_opt("--year", year), "--limit", limit, "--min-balls", min_balls)
+def batting(year: str | None = YEAR(), limit: int = Query(15, ge=1, le=100), min_balls: int = Query(0, ge=0),
+            sort: Literal[tuple(queries.BAT_SORTS)] = "runs", team: str | None = TEAM_FILTER()):  # type: ignore[valid-type]
+    return _run("top-batters", *_opt("--year", year), "--limit", limit, "--min-balls", min_balls,
+                "--sort", sort, *_opt("--team", team))
 
 
 @router.get("/bowling")
-def bowling(year: str | None = YEAR(), limit: int = Query(15, ge=1, le=100), min_balls: int = Query(0, ge=0)):
-    return _run("top-bowlers", *_opt("--year", year), "--limit", limit, "--min-balls", min_balls)
+def bowling(year: str | None = YEAR(), limit: int = Query(15, ge=1, le=100), min_balls: int = Query(0, ge=0),
+            sort: Literal[tuple(queries.BOWL_SORTS)] = "wkts", team: str | None = TEAM_FILTER()):  # type: ignore[valid-type]
+    return _run("top-bowlers", *_opt("--year", year), "--limit", limit, "--min-balls", min_balls,
+                "--sort", sort, *_opt("--team", team))
 
 
 @router.get("/records")
@@ -104,3 +112,26 @@ def player(player_id: int, year: str | None = YEAR()):
 @router.get("/h2h")
 def h2h(team1: str = TEAM(), team2: str = TEAM(), year: str | None = YEAR()):
     return _run("h2h", team1, team2, *_opt("--year", year))
+
+
+@router.get("/matchup")
+def matchup(batter: str = Query(..., min_length=2, max_length=60), bowler: str = Query(..., min_length=2, max_length=60),
+            year: str | None = YEAR()):
+    return _run("matchup", batter, bowler, *_opt("--year", year))
+
+
+@router.get("/venues")
+def venues(name: str | None = Query(None, max_length=60), year: str | None = YEAR(), limit: int = Query(15, ge=1, le=60)):
+    return _run("venues", *([name] if name else []), *_opt("--year", year), "--limit", limit)
+
+
+@router.get("/champions")
+def champions(year: str | None = YEAR()):
+    return _run("champions", *_opt("--year", year))
+
+
+@router.get("/teams/{code}")
+def team(code: str, year: str | None = YEAR()):
+    if not code.isalpha() or not 2 <= len(code) <= 6:
+        raise HTTPException(status_code=422, detail="team code must be 2-6 letters, e.g. CSK")
+    return _run("team", code, *_opt("--year", year))
