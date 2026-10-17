@@ -1,6 +1,7 @@
 """LangGraph orchestration for grounded cricket chat and observable UI control."""
 
 import json
+import os
 import re
 from collections.abc import Iterator
 from datetime import datetime
@@ -8,6 +9,7 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from . import stats
 from .gemma import GemmaCompletionClient
 from .entities import resolve_entities
 from .llm import GemmaProvider, LLMRouter
@@ -22,6 +24,21 @@ Rules:
 - Copy numbers exactly as they appear in the facts. Do not calculate new figures.
 - For momentum, turning-point, or "where was it won/lost" questions, use the MOMENTUM SHIFTS lines: say who seized control, in which overs, how (collapse, burst, squeeze, chase pressure, missed chance), and the deliveries or commentary that show it. Lead with the largest shift.
 - If the facts do not contain the answer, say what is missing in one sentence.
+- At most five sentences. Plain text, no markdown tables or headings."""
+
+STATS_PROMPT = """You are Pandit, the cricket analyst inside Cricbot. Answer from the TABLES only; they come from a
+ball-by-ball archive of every IPL match and follow official scoring conventions.
+Rules:
+- Lead with the direct answer (who or what, and the number), then one or two supporting numbers from the tables.
+- Copy numbers exactly as they appear. Do not calculate new numbers: no differences, sums or percentages that are not in the tables.
+- Rank words (top, second, third) must match the rank column.
+- When ranking by strike rate, economy or average, mention the minimum-balls threshold given in the table title.
+- When comparing players, compare the same columns for each and say which is better on each.
+- In batter-v-bowler tables, balls are deliveries faced: say "108 balls", not "108 times"; outs are dismissals by that bowler.
+- If a NOTE says a name is ambiguous or unknown, ask which player the user means, listing the options.
+- If the tables do not answer the question, say what is missing in one sentence.
+- Write natural sentences. Do not say "rank 1", "row", "Total row" or raw column names (6s, sr, econ); say "sixes",
+  "strike rate", "economy", "in all".
 - At most five sentences. Plain text, no markdown tables or headings."""
 
 
@@ -53,11 +70,17 @@ class PanditState(TypedDict, total=False):
     cards: list[dict[str, Any]]
     provider: str
     model: str
+    route: str
+    planner: str
+    stats_calls: list[dict[str, Any]]
+    stats_results: list[dict[str, Any]]
 
 
 GRAPH_NODES = [
     {"id": "normalize_request", "label": "Understand request", "kind": "input", "description": "Normalize the question, dashboard context, and recent conversation."},
     {"id": "extract_entities", "label": "Resolve cricket entities", "kind": "entity", "description": "Correct team typos and resolve teams, players, years, match terms, venues, and list intent."},
+    {"id": "plan_question", "label": "Plan the question", "kind": "routing", "description": "Decide between one match and stats across matches; for stats, choose archive queries (LLM tool calling, keyword rules as fallback)."},
+    {"id": "run_stats", "label": "Query stats archive", "kind": "tool", "description": "Run the chosen DuckDB queries (leaders, player profiles, matchups, records, head to head, teams, venues, champions)."},
     {"id": "route_tools", "label": "Select tools", "kind": "routing", "description": "Choose match, player, standings, or analytics tools from the resolved retrieval query."},
     {"id": "retrieve_facts", "label": "Retrieve cricket facts", "kind": "tool", "description": "Search the match archive for the resolved teams, seasons, and stages."},
     {"id": "load_match", "label": "Load match data", "kind": "tool", "description": "Fetch scorecard, ball-by-ball, and commentary for the match the question is about."},
@@ -72,7 +95,10 @@ GRAPH_NODES = [
 GRAPH_EDGES = [
     {"from": "start", "to": "normalize_request"},
     {"from": "normalize_request", "to": "extract_entities"},
-    {"from": "extract_entities", "to": "route_tools"},
+    {"from": "extract_entities", "to": "plan_question"},
+    {"from": "plan_question", "to": "run_stats", "condition": "stats across matches"},
+    {"from": "plan_question", "to": "route_tools", "condition": "one match or not a stats question"},
+    {"from": "run_stats", "to": "plan_ui"},
     {"from": "route_tools", "to": "retrieve_facts"},
     {"from": "retrieve_facts", "to": "load_match"},
     {"from": "load_match", "to": "summarize_context"},
@@ -98,6 +124,8 @@ class CricbotAgent:
         workflow = StateGraph(PanditState)
         workflow.add_node("normalize_request", self._normalize_request)
         workflow.add_node("extract_entities", self._extract_entities)
+        workflow.add_node("plan_question", self._plan_question)
+        workflow.add_node("run_stats", self._run_stats)
         workflow.add_node("route_tools", self._route_tools)
         workflow.add_node("retrieve_facts", self._retrieve_facts)
         workflow.add_node("load_match", self._load_match)
@@ -109,7 +137,13 @@ class CricbotAgent:
         workflow.add_node("finalize", self._finalize)
         workflow.add_edge(START, "normalize_request")
         workflow.add_edge("normalize_request", "extract_entities")
-        workflow.add_edge("extract_entities", "route_tools")
+        workflow.add_edge("extract_entities", "plan_question")
+        workflow.add_conditional_edges(
+            "plan_question",
+            lambda state: state["route"],
+            {"stats": "run_stats", "match": "route_tools"},
+        )
+        workflow.add_edge("run_stats", "plan_ui")
         workflow.add_edge("route_tools", "retrieve_facts")
         workflow.add_edge("retrieve_facts", "load_match")
         workflow.add_edge("load_match", "summarize_context")
@@ -135,14 +169,14 @@ class CricbotAgent:
             "providers": providers,
             "contract": "chat/completions",
             "orchestrator": "langgraph",
-            "graph_version": "2.0",
+            "graph_version": "2.1",
         }
 
     @staticmethod
     def graph_definition() -> dict[str, Any]:
         return {
             "name": "Pandit Cricket Assistant",
-            "version": "2.0",
+            "version": "2.1",
             "framework": "LangGraph",
             "nodes": GRAPH_NODES,
             "edges": GRAPH_EDGES,
@@ -194,7 +228,7 @@ class CricbotAgent:
             "cards": current.get("cards", []),
             "validation": current.get("validation", "exact-tool-output"),
             "trace": trace,
-            "graph_version": "2.0",
+            "graph_version": "2.1",
         }
         yield {"event": "result", "data": response}
 
@@ -226,6 +260,42 @@ class CricbotAgent:
             "entities": entities,
             "retrieval_query": entities["retrieval_query"],
             "intermediate_message": f"Resolved {resolved}; applied {correction_count} correction{'s' if correction_count != 1 else ''}; intent is {entities['intent']}.",
+        }
+
+    def _plan_question(self, state: PanditState) -> PanditState:
+        query = state["query"]
+        if not stats.available():
+            return {"route": "match", "planner": "none", "stats_calls": [],
+                    "intermediate_message": "No stats archive on disk; treating this as a match question."}
+        try:
+            index = stats.player_index()
+        except Exception as exc:                          # a broken archive must not break chat
+            return {"route": "match", "planner": "none", "stats_calls": [],
+                    "intermediate_message": f"Stats archive unavailable ({str(exc)[:120]})."}
+        calls, planner, note = stats.plan(query, state.get("entities", {}), self.llm, state.get("history"), index,
+                                          mode=os.environ.get("PANDIT_PLANNER", "hybrid"))
+        route = "stats" if calls else "match"
+        described = "; ".join(f"{c['name']}({', '.join(f'{k}={v}' for k, v in (c.get('args') or {}).items() if v not in (None, ''))})" for c in calls)
+        return {
+            "route": route, "planner": planner, "stats_calls": calls,
+            "intermediate_message": (f"{planner} planned {described}." if calls
+                                     else f"{note} Routed to the match path.".strip()),
+        }
+
+    @staticmethod
+    def _run_stats(state: PanditState) -> PanditState:
+        results = stats.run_calls(state.get("stats_calls", []))
+        facts = stats.facts_text(results)
+        tables = sum(1 for r in results for b in r["blocks"] if b["type"] == "table")
+        errors = [r["error"] for r in results if r["error"]]
+        return {
+            "stats_results": results,
+            "compact_results": facts,
+            "cards": [stats.card(results, state["query"])],
+            "results": [],
+            "match_target": None,
+            "intermediate_message": f"Ran {len(results)} archive quer{'y' if len(results) == 1 else 'ies'}: {tables} table{'s' if tables != 1 else ''}"
+                                    + (f"; {'; '.join(errors)}" if errors else "."),
         }
 
     @staticmethod
@@ -292,6 +362,9 @@ class CricbotAgent:
         }
 
     def _plan_ui(self, state: PanditState) -> PanditState:
+        if state.get("route") == "stats":
+            return {"actions": [], "response_route": "model",
+                    "intermediate_message": "Stats answer: no dashboard change; routed to model response."}
         actions = self._ui_actions(state["query"], state.get("results", []), state.get("entities"), state.get("match_target"), state.get("ui_context", {}))
         response_route = "exact" if self._needs_exact_tool_answer(state["query"], state.get("entities")) else "model"
         return {
@@ -314,9 +387,9 @@ class CricbotAgent:
             for item in state.get("history", [])[-6:]
         ]
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": STATS_PROMPT if state.get("route") == "stats" else SYSTEM_PROMPT},
             *history,
-            {"role": "user", "content": f"FACTS:\n{state['compact_results']}\n\nQUESTION: {state['query']}"},
+            {"role": "user", "content": f"{'TABLES' if state.get('route') == 'stats' else 'FACTS'}:\n{state['compact_results']}\n\nQUESTION: {state['query']}"},
         ]
         try:
             candidate, provider, model = self.llm.chat(messages)
@@ -346,12 +419,23 @@ class CricbotAgent:
         }
 
     def _grounded_fallback(self, state: PanditState) -> str:
+        if state.get("route") == "stats":
+            return stats.summary(state.get("stats_results", []), state.get("query", ""))
         cards = state.get("cards") or []
         if cards and cards[0]["type"] == "match" and state.get("entities", {}).get("intent") != "list_matches":
             return deterministic_summary(cards[0], state.get("query", ""))
         return self._fallback_reply(state["query"], state.get("results", []), state.get("entities"))
 
     def _finalize(self, state: PanditState) -> PanditState:
+        if state.get("route") == "stats":
+            return {
+                "tool_calls": [
+                    {"name": r["name"], "args": r.get("args") or {}, "command": " ".join(r["argv"]),
+                     "result_count": sum(len(b["rows"]) for b in r["blocks"] if b["type"] == "table"), "error": r["error"]}
+                    for r in state.get("stats_results", [])
+                ],
+                "intermediate_message": "Final reply, query provenance, and stats tables packaged for the UI.",
+            }
         results = state.get("results", [])
         tool_calls = [
             {"name": name, "result_count": sum(1 for row in results if self._belongs(row, name))}
@@ -383,6 +467,7 @@ class CricbotAgent:
                 "route": state.get("response_route", "pending"),
                 "tools": state.get("tool_names", []),
                 "result_count": len(state.get("results", [])),
+                "path": state.get("route", "pending"),
                 "action_count": len(state.get("actions", [])),
                 "model_used": state.get("model_used", False),
                 "validation": state.get("validation", "pending"),
@@ -400,6 +485,14 @@ class CricbotAgent:
             return {
                 "entities": patch.get("entities", {}),
                 "retrieval_query": patch.get("retrieval_query", ""),
+            }
+        if node == "plan_question":
+            return {"route": patch.get("route"), "planner": patch.get("planner"), "calls": patch.get("stats_calls", [])}
+        if node == "run_stats":
+            return {
+                "commands": [" ".join(r["argv"]) for r in patch.get("stats_results", [])],
+                "errors": [r["error"] for r in patch.get("stats_results", []) if r["error"]],
+                "facts_preview": patch.get("compact_results", "")[:900],
             }
         if node == "route_tools":
             return {"tool_names": patch.get("tool_names", [])}

@@ -1,7 +1,8 @@
 """Hosted LLM providers for Pandit's answer synthesis.
 
-Pandit retrieves facts deterministically; the LLM only phrases (summarises)
-those facts. Providers are tried in order until one answers:
+Pandit retrieves facts with tools; the LLM picks which stats tools to call
+(``plan``) and phrases (summarises) the facts they return (``chat``).
+Providers are tried in order until one answers:
 
     LLM_PROVIDERS=groq,openrouter,gemma      (default)
 
@@ -15,6 +16,8 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 from typing import Any
+
+import json
 
 import httpx
 
@@ -43,17 +46,21 @@ class ProviderConfig:
     model: str
     key_env: str
     extra_headers: dict[str, str]
+    plan_model: str = ""          # model for tool-call planning; defaults to `model`
 
 
 PROVIDERS = {
     "groq": lambda: ProviderConfig(
         "groq", os.getenv("GROQ_API_BASE", "https://api.groq.com/openai/v1"),
-        os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"), "GROQ_API_KEY", {},
+        os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"), "GROQ_API_KEY", {},
+        # Planning on a second model gives it its own per-model rate limit (Groq free tier: 8k tokens/min each).
+        os.getenv("GROQ_PLAN_MODEL", "openai/gpt-oss-20b"),
     ),
     "openrouter": lambda: ProviderConfig(
         "openrouter", os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1"),
         os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct"), "OPENROUTER_API_KEY",
         {"HTTP-Referer": os.getenv("OPENROUTER_REFERER", "http://localhost:3000"), "X-Title": "Cricbot"},
+        os.getenv("OPENROUTER_PLAN_MODEL", ""),
     ),
 }
 
@@ -65,6 +72,7 @@ class ChatProvider:
         self.config = config
         self.name = config.name
         self.model = config.model
+        self.plan_model = config.plan_model or config.model
         self.api_key = os.getenv(config.key_env, "")
         self.client = client or httpx.Client(base_url=config.base_url.rstrip("/"), timeout=httpx.Timeout(45.0, connect=5.0))
 
@@ -75,17 +83,24 @@ class ChatProvider:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json", **self.config.extra_headers}
 
-    def chat(self, messages: list[dict[str, str]], *, max_tokens: int = 400, temperature: float = 0.2) -> str:
+    def _reasoning(self, model: str) -> dict[str, Any]:
+        """Reasoning models (gpt-oss) spend completion tokens thinking; keep that short."""
+        if "gpt-oss" not in model:
+            return {}
+        return {"reasoning_effort": "low"} if self.name == "groq" else {"reasoning": {"effort": "low"}}
+
+    def _post(self, body: dict[str, Any], model: str | None = None) -> httpx.Response:
         if not self.configured:
             raise RuntimeError(f"{self.name}: {self.config.key_env} is not set")
+        model = model or self.model
         try:
-            response = self.client.post(
-                "/chat/completions",
-                headers=self._headers(),
-                json={"model": self.model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature},
-            )
+            return self.client.post("/chat/completions", headers=self._headers(),
+                                    json={"model": model, **self._reasoning(model), **body})
         except httpx.HTTPError as exc:
             raise RuntimeError(f"{self.name}: {exc}") from exc
+
+    def chat(self, messages: list[dict[str, str]], *, max_tokens: int = 900, temperature: float = 0.2) -> str:
+        response = self._post({"messages": messages, "max_tokens": max_tokens, "temperature": temperature})
         if response.status_code != 200:
             raise RuntimeError(f"{self.name}: HTTP {response.status_code} {response.text[:200]}")
         try:
@@ -95,6 +110,29 @@ class ChatProvider:
         if not isinstance(text, str) or not text.strip():
             raise RuntimeError(f"{self.name}: empty completion")
         return text.strip()
+
+    def plan(self, messages: list[dict[str, str]], tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Tool calls the model chose: [{"name", "args"}]. [] when it answered without a tool."""
+        response = self._post({"messages": messages, "tools": tools, "tool_choice": "auto",
+                               "max_tokens": 700, "temperature": 0}, model=self.plan_model)
+        if response.status_code == 400 and "tool_use_failed" in response.text:
+            return []                                     # the model replied in prose instead
+        if response.status_code != 200:
+            raise RuntimeError(f"{self.name}: HTTP {response.status_code} {response.text[:200]}")
+        try:
+            message = response.json()["choices"][0]["message"]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(f"{self.name}: unexpected response shape") from exc
+        calls = []
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") or {}
+            try:
+                args = json.loads(function.get("arguments") or "{}")
+            except ValueError:
+                continue
+            if function.get("name") and isinstance(args, dict):
+                calls.append({"name": function["name"], "args": args})
+        return calls
 
     def ready(self) -> bool:
         if not self.configured:
@@ -114,6 +152,8 @@ class GemmaProvider:
         self.gemma = client or GemmaCompletionClient()
         self.model = self.gemma.model
         self.configured = True
+
+    supports_tools = False
 
     def chat(self, messages: list[dict[str, str]], **_kwargs: Any) -> str:
         prompt = "\n\n".join(f"{item['role'].title()}: {item['content']}" for item in messages) + "\n\nAssistant:"
@@ -149,6 +189,18 @@ class LLMRouter:
             except RuntimeError as exc:
                 self.last_errors.append(str(exc)[:240])
         raise RuntimeError("; ".join(self.last_errors) or "No LLM provider is configured")
+
+    def plan(self, messages: list[dict[str, str]], tools: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str, str]:
+        """Return (tool calls, provider, model) from the first provider that supports tools."""
+        errors = []
+        for provider in self.providers:
+            if not provider.configured or not getattr(provider, "supports_tools", True) or not hasattr(provider, "plan"):
+                continue
+            try:
+                return provider.plan(messages, tools), provider.name, getattr(provider, "plan_model", provider.model)
+            except RuntimeError as exc:
+                errors.append(str(exc)[:240])
+        raise RuntimeError("; ".join(errors) or "No tool-calling LLM provider is configured")
 
     def status(self) -> list[dict[str, Any]]:
         return [
