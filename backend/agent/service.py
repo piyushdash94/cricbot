@@ -34,6 +34,9 @@ Rules:
 - Rank words (top, second, third) must match the rank column.
 - When ranking by strike rate, economy or average, mention the minimum-balls threshold given in the table title.
 - When comparing players, compare the same columns for each and say which is better on each.
+- Cricket words: maximums = sixes, scalps = wickets, tons/centuries = hundreds, half-centuries = fifties, Orange Cap =
+  most runs in a season, Purple Cap = most wickets in a season, economy = runs per over.
+- Name players exactly as the tables do, and only players that appear in the tables.
 - In batter-v-bowler tables, balls are deliveries faced: say "108 balls", not "108 times"; outs are dismissals by that bowler.
 - If a NOTE says a name is ambiguous or unknown, ask which player the user means, listing the options.
 - If the tables do not answer the question, say what is missing in one sentence.

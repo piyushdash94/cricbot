@@ -52,9 +52,10 @@ class ProviderConfig:
 PROVIDERS = {
     "groq": lambda: ProviderConfig(
         "groq", os.getenv("GROQ_API_BASE", "https://api.groq.com/openai/v1"),
-        os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"), "GROQ_API_KEY", {},
-        # Planning on a second model gives it its own per-model rate limit (Groq free tier: 8k tokens/min each).
-        os.getenv("GROQ_PLAN_MODEL", "openai/gpt-oss-20b"),
+        # Comma-separated lists: on a rate limit the next model is tried. Groq's free tier limits each
+        # model separately (8k tokens a minute, 200k a day), so a list stretches the budget.
+        os.getenv("GROQ_MODEL", "openai/gpt-oss-120b,qwen/qwen3.8-27b"), "GROQ_API_KEY", {},
+        os.getenv("GROQ_PLAN_MODEL", "openai/gpt-oss-20b,qwen/qwen3.8-27b,openai/gpt-oss-120b"),
     ),
     "openrouter": lambda: ProviderConfig(
         "openrouter", os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1"),
@@ -71,8 +72,10 @@ class ChatProvider:
     def __init__(self, config: ProviderConfig, client: httpx.Client | None = None):
         self.config = config
         self.name = config.name
-        self.model = config.model
-        self.plan_model = config.plan_model or config.model
+        self.models = [m.strip() for m in config.model.split(",") if m.strip()]
+        self.plan_models = [m.strip() for m in (config.plan_model or config.model).split(",") if m.strip()]
+        self.model = self.models[0]
+        self.plan_model = self.plan_models[0]
         self.api_key = os.getenv(config.key_env, "")
         self.client = client or httpx.Client(base_url=config.base_url.rstrip("/"), timeout=httpx.Timeout(45.0, connect=5.0))
 
@@ -99,8 +102,19 @@ class ChatProvider:
         except httpx.HTTPError as exc:
             raise RuntimeError(f"{self.name}: {exc}") from exc
 
+    def _first_available(self, models: list[str], body: dict[str, Any]) -> httpx.Response:
+        """Post to each model in turn until one is not rate limited; remember which one answered."""
+        response = None
+        for model in models:
+            response = self._post(body, model=model)
+            if response.status_code != 429:
+                self.last_model = model
+                return response
+        return response
+
     def chat(self, messages: list[dict[str, str]], *, max_tokens: int = 900, temperature: float = 0.2) -> str:
-        response = self._post({"messages": messages, "max_tokens": max_tokens, "temperature": temperature})
+        response = self._first_available(self.models, {"messages": messages, "max_tokens": max_tokens,
+                                                       "temperature": temperature})
         if response.status_code != 200:
             raise RuntimeError(f"{self.name}: HTTP {response.status_code} {response.text[:200]}")
         try:
@@ -113,8 +127,8 @@ class ChatProvider:
 
     def plan(self, messages: list[dict[str, str]], tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Tool calls the model chose: [{"name", "args"}]. [] when it answered without a tool."""
-        response = self._post({"messages": messages, "tools": tools, "tool_choice": "auto",
-                               "max_tokens": 700, "temperature": 0}, model=self.plan_model)
+        response = self._first_available(self.plan_models, {"messages": messages, "tools": tools, "tool_choice": "auto",
+                                                            "max_tokens": 700, "temperature": 0})
         if response.status_code == 400 and "tool_use_failed" in response.text:
             return []                                     # the model replied in prose instead
         if response.status_code != 200:
@@ -185,7 +199,8 @@ class LLMRouter:
             if not provider.configured:
                 continue
             try:
-                return provider.chat(messages, **kwargs), provider.name, provider.model
+                text = provider.chat(messages, **kwargs)
+                return text, provider.name, getattr(provider, "last_model", provider.model)
             except RuntimeError as exc:
                 self.last_errors.append(str(exc)[:240])
         raise RuntimeError("; ".join(self.last_errors) or "No LLM provider is configured")
@@ -197,7 +212,8 @@ class LLMRouter:
             if not provider.configured or not getattr(provider, "supports_tools", True) or not hasattr(provider, "plan"):
                 continue
             try:
-                return provider.plan(messages, tools), provider.name, getattr(provider, "plan_model", provider.model)
+                calls = provider.plan(messages, tools)
+                return calls, provider.name, getattr(provider, "last_model", provider.model)
             except RuntimeError as exc:
                 errors.append(str(exc)[:240])
         raise RuntimeError("; ".join(errors) or "No tool-calling LLM provider is configured")

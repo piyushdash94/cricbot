@@ -236,3 +236,41 @@ def test_question_sets_are_well_formed():
     assert contains("Kohli made 973 runs", "973") and not contains("Kohli made 9736 runs", "973")
     assert contains("economy of 6.48", "6.48") and not contains("6.489", "6.48")
     assert answer_ok("CSK won", [["CSK", "Chennai"]]) and not answer_ok("MI won", [["CSK", "Chennai"]])
+
+
+def test_plans_are_grounded_in_the_question():
+    """LLM plans may only use players and years the question gives (seen on the held-out set)."""
+    q = "chahal wickets total"
+    assert stats.ground_calls([{"name": "player_profile", "args": {"name": "Jasprit Bumrah"}}], q, resolve_entities(q))[0] == []
+    q = "orange cap holder 2019"
+    kept, _ = stats.ground_calls([{"name": "batting_leaders", "args": {"year": "2018"}}], q, resolve_entities(q))
+    assert kept[0]["args"]["year"] == "2019"
+    q = "most centuries in ipl"
+    kept, _ = stats.ground_calls([{"name": "batting_leaders", "args": {"sort": "hundreds", "year": "2024"}}], q,
+                                 resolve_entities(q))
+    assert "year" not in kept[0]["args"]
+    q = "most runs this season"
+    kept, _ = stats.ground_calls([{"name": "batting_leaders", "args": {"year": "2026"}}], q, resolve_entities(q))
+    assert kept[0]["args"]["year"] == "2026"
+    index = stats.PlayerIndex([stats.Player(1, "Kieron Pollard", 200)])
+    index.keys = {k: index.players for k in stats._name_keys("Kieron Pollard")}
+    assert index.lookup("Chris Pollard")[0].name == "Kieron Pollard"
+
+
+def test_rate_limited_model_falls_through_to_the_next():
+    seen = []
+
+    def handler(request):
+        model = json.loads(request.content)["model"]
+        seen.append(model)
+        if model == "openai/gpt-oss-20b":
+            return httpx.Response(429, json={"error": {"message": "tokens per day (TPD)"}})
+        return httpx.Response(200, json={"choices": [{"message": {"tool_calls": [{"function": {
+            "name": "champions", "arguments": "{}"}}]}}]})
+
+    config = ProviderConfig("groq", "https://api.groq.test", "openai/gpt-oss-120b", "TEST_KEY", {},
+                            "openai/gpt-oss-20b,qwen/qwen3.8-27b")
+    provider = ChatProvider(config, client=httpx.Client(base_url="https://api.groq.test", transport=httpx.MockTransport(handler)))
+    provider.api_key = "test"
+    calls, name, model = LLMRouter([provider]).plan([{"role": "user", "content": "who won IPL 2019"}], stats.TOOLS)
+    assert seen == ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"] and model == "qwen/qwen3.8-27b" and calls[0]["name"] == "champions"

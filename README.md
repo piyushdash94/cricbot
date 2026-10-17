@@ -57,7 +57,7 @@ Pandit's LLM keys live in `backend/.env` (git-ignored, loaded at startup; shell 
 cp backend/.env.example backend/.env   # then set GROQ_API_KEY and OPENROUTER_API_KEY
 ```
 
-Providers are tried in `LLM_PROVIDERS` order (default `groq,openrouter,gemma`); models are set with `GROQ_MODEL` (default `openai/gpt-oss-120b`, which writes answers), `GROQ_PLAN_MODEL` (default `openai/gpt-oss-20b`, which picks stats queries) and `OPENROUTER_MODEL`. Planning and answering use different Groq models because each has its own free-tier limit (8k tokens a minute). The LLM never invents data: it picks verified queries and summarises what they return. If no provider answers, or an answer contains a number that is not in the facts, Pandit replies with a grounded recap instead. `GET /api/agent/status` shows which provider is live.
+Providers are tried in `LLM_PROVIDERS` order (default `groq,openrouter,gemma`); models are set with `GROQ_MODEL` (answers; default `openai/gpt-oss-120b,qwen/qwen3.8-27b`), `GROQ_PLAN_MODEL` (picks stats queries; default `openai/gpt-oss-20b,qwen/qwen3.8-27b,openai/gpt-oss-120b`) and `OPENROUTER_MODEL`. Groq's free tier limits each model separately (8k tokens a minute, 200k a day, roughly 80-100 questions), so the settings are lists: a rate-limited model hands over to the next one before Pandit falls back to OpenRouter. The LLM never invents data: it picks verified queries and summarises what they return. If no provider answers, or an answer contains a number that is not in the facts, Pandit replies with a grounded recap instead. `GET /api/agent/status` shows which provider is live.
 
 ### Asking Pandit about stats
 

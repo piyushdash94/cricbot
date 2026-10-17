@@ -30,11 +30,13 @@ MATCH_ROUTE = "route_to_match"
 YEAR_PATTERN = re.compile(r"^\d{4}(-\d{4})?$")
 TEAM_CODES = set(TEAM_ALIASES)
 MAX_CALLS = 4
+TIME_WORDS = re.compile(r"\b(19|20)\d\d\b|\b(season|seasons|year|years|edition|this|last|current|previous|recent|ago)\b")
 ON_SCREEN = re.compile(r"\b(this|that|the current) (match|game|innings|chase)\b|\bin this one\b")
 
-YEAR_PARAM = {"type": "string", "description": "IPL year '2016' or range '2016-2018'. Omit for all time."}
-TEAM_PARAM = {"type": "string", "description": "Team code, e.g. CSK, MI, RCB, PBKS (Kings XI Punjab), DC (Delhi Daredevils)."}
-PLAYER_PARAM = {"type": "string", "description": "Player's full name, e.g. Virat Kohli."}
+# Short schemas: every planning call sends them, and Groq's free tier counts tokens per minute and per day.
+YEAR_PARAM = {"type": "string", "description": "2016, or 2016-2018; omit for all time"}
+TEAM_PARAM = {"type": "string", "description": "team code"}
+PLAYER_PARAM = {"type": "string", "description": "full name"}
 
 
 def _fn(name: str, description: str, properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -45,41 +47,35 @@ def _fn(name: str, description: str, properties: dict[str, Any], required: list[
 
 
 TOOLS: list[dict[str, Any]] = [
-    _fn(MATCH_ROUTE, "The question is about ONE specific match (a final, a game between two teams on a date, its "
-        "scorecard, momentum, commentary or result), or is not an IPL statistics question.", {}),
-    _fn("batting_leaders", "Batting leaderboard across matches: most runs (Orange Cap), sixes, fours, fifties, "
-        "hundreds, highest score, best strike rate or average. Optionally for one team.", {
-            "year": YEAR_PARAM, "team": TEAM_PARAM,
-            "sort": {"type": "string", "enum": list(queries.BAT_SORTS), "description": "What to rank by (default runs)."},
-            "min_balls": {"type": "integer", "description": "Minimum balls faced; set for strike-rate questions."},
-            "limit": {"type": "integer", "description": "Rows, default 10."}}),
-    _fn("bowling_leaders", "Bowling leaderboard across matches: most wickets (Purple Cap), best economy, average, "
-        "strike rate, four-wicket hauls. Optionally for one team.", {
-            "year": YEAR_PARAM, "team": TEAM_PARAM,
-            "sort": {"type": "string", "enum": list(queries.BOWL_SORTS), "description": "What to rank by (default wkts)."},
-            "min_balls": {"type": "integer", "description": "Minimum balls bowled; set for economy questions."},
-            "limit": {"type": "integer", "description": "Rows, default 10."}}),
-    _fn("player_profile", "One player's IPL batting and bowling, year by year (with a Total row) and by phase "
-        "(powerplay, middle, death).", {"name": PLAYER_PARAM, "year": YEAR_PARAM}, ["name"]),
-    _fn("batter_vs_bowler", "Every ball one batter faced from one bowler: balls, runs, dismissals, strike rate.", {
-        "batter": PLAYER_PARAM, "bowler": PLAYER_PARAM, "year": YEAR_PARAM}, ["batter", "bowler"]),
-    _fn("phase_leaders", "Best batters (strike rate) or bowlers (economy) in one phase: powerplay overs 1-6, "
-        "middle 7-15, death 16-20.", {
+    _fn(MATCH_ROUTE, "Question is about ONE match (a final, a named game, its scorecard, momentum, commentary) "
+        "or is not an IPL stats question.", {}),
+    _fn("batting_leaders", "Batting leaderboard: most runs (Orange Cap), sixes, fours, fifties, hundreds, highest "
+        "score, strike rate or average; optionally one team.", {
+            "year": YEAR_PARAM, "team": TEAM_PARAM, "sort": {"type": "string", "enum": list(queries.BAT_SORTS)},
+            "min_balls": {"type": "integer"}}),
+    _fn("bowling_leaders", "Bowling leaderboard: most wickets (Purple Cap), economy, average, strike rate, "
+        "four-wicket hauls; optionally one team.", {
+            "year": YEAR_PARAM, "team": TEAM_PARAM, "sort": {"type": "string", "enum": list(queries.BOWL_SORTS)},
+            "min_balls": {"type": "integer"}}),
+    _fn("player_profile", "One player's batting and bowling by year (with totals) and by phase.",
+        {"name": PLAYER_PARAM, "year": YEAR_PARAM}, ["name"]),
+    _fn("batter_vs_bowler", "Every ball a batter faced from a bowler.",
+        {"batter": PLAYER_PARAM, "bowler": PLAYER_PARAM, "year": YEAR_PARAM}, ["batter", "bowler"]),
+    _fn("phase_leaders", "Best batters (strike rate) or bowlers (economy) in powerplay (1-6), middle (7-15) or "
+        "death (16-20) overs.", {
             "phase": {"type": "string", "enum": ["powerplay", "middle", "death"]},
-            "role": {"type": "string", "enum": ["bat", "bowl"]},
-            "year": YEAR_PARAM, "min_balls": {"type": "integer", "description": "Default 60."}}, ["phase", "role"]),
-    _fn("records", "Records: highest team totals, highest individual scores, best bowling figures, fastest "
-        "fifties, most sixes in an innings.", {"year": YEAR_PARAM}),
-    _fn("head_to_head", "Results between two teams, season by season, with a Total row.", {
-        "team1": TEAM_PARAM, "team2": TEAM_PARAM, "year": YEAR_PARAM}, ["team1", "team2"]),
-    _fn("team_seasons", "One team season by season: played, won, lost, win %, how far they got "
-        "(champions, runner-up, playoffs).", {"team": TEAM_PARAM, "year": YEAR_PARAM}, ["team"]),
-    _fn("champions", "IPL finals: champion, runner-up and result each year, and titles by team.", {"year": YEAR_PARAM}),
-    _fn("venue_stats", "Grounds: matches, average first-innings score, bat-first vs chasing wins, highest total.", {
-        "name": {"type": "string", "description": "Part of the ground name, e.g. Wankhede, Chepauk, Eden. Omit to list all."},
-        "year": YEAR_PARAM}),
-    _fn("season_summary", "Per IPL season: matches, run rate, average first innings, highest total, sixes.", {
-        "year": YEAR_PARAM}),
+            "role": {"type": "string", "enum": ["bat", "bowl"]}, "year": YEAR_PARAM}, ["phase", "role"]),
+    _fn("records", "Highest team totals, highest individual scores, best figures, fastest fifties, most sixes "
+        "in an innings.", {"year": YEAR_PARAM}),
+    _fn("head_to_head", "Results between two teams by season.",
+        {"team1": TEAM_PARAM, "team2": TEAM_PARAM, "year": YEAR_PARAM}, ["team1", "team2"]),
+    _fn("team_seasons", "One team by season: played, won, lost, how far they got; titles.",
+        {"team": TEAM_PARAM, "year": YEAR_PARAM}, ["team"]),
+    _fn("champions", "Each final's champion, runner-up and result; titles by team.", {"year": YEAR_PARAM}),
+    _fn("venue_stats", "Grounds: average first innings, bat-first vs chasing wins, highest total.",
+        {"name": {"type": "string", "description": "ground or nickname, e.g. Wankhede, Chepauk"}, "year": YEAR_PARAM}),
+    _fn("season_summary", "Per season: matches, run rate, average first innings, highest total, total sixes.",
+        {"year": YEAR_PARAM}),
 ]
 TOOL_NAMES = {tool["function"]["name"] for tool in TOOLS}
 
@@ -156,6 +152,8 @@ class PlayerIndex:
                 return initial[0], []
             if initial:
                 return _dominant(initial)
+            if self.keys.get(surname):                # wrong first name, clear surname: "Chris Pollard"
+                return _dominant(self.keys[surname])
         candidates = self.keys.get(text, [])
         if not candidates:
             candidates = [p for p in self.players if text in _norm(p.name)]
@@ -294,6 +292,7 @@ def to_argv(call: dict[str, Any], index: PlayerIndex | None = None) -> list[str]
         if phase not in ("powerplay", "middle", "death") or role not in ("bat", "bowl"):
             raise PlanError("phase must be powerplay, middle or death; role bat or bowl")
         balls = _int(args, "min_balls", 0, 5000)
+        balls = balls if balls and balls >= 30 else None          # a tiny sample is not a ranking
         return ["phase", phase, "--role", role, *_year(args), "--limit", "10",
                 *(["--min-balls", str(balls)] if balls is not None else [])]
     if name == "records":
@@ -454,8 +453,9 @@ def summary(results: list[dict[str, Any]], question: str = "") -> str:
             parts.append(f"{block['title']}: {rows[0][0]} — {_describe(cols, rows[0], 1)}.")
             continue
         key = _key_column(result)
+        asked_col = "6s" if asked == "sixes" and "6s" in cols else (asked if asked in cols else None)
         record_col = next((c for c in ("score", "figures", "balls_to_50", "6s") if c in cols), None)
-        column = key if key in cols else (asked if asked in cols else (record_col or cols[1]))
+        column = key if key in cols else (asked_col or record_col or cols[1])
         top = [f"{r[0]} ({_label(column)} {r[cols.index(column)]})" for r in rows[:3]]
         parts.append(f"{block['title']}: " + ", then ".join(top) + ".")
     return " ".join(parts) or "The archive has no rows for that question."
@@ -478,26 +478,21 @@ def card(results: list[dict[str, Any]], question: str) -> dict[str, Any]:
 
 def planner_prompt(today: date | None = None) -> str:
     today = today or date.today()
-    teams = ", ".join(f"{code} = {names[-1].title() if len(names) > 1 else names[0].upper()}"
-                      for code, names in TEAM_ALIASES.items())
-    return f"""You route IPL cricket questions to database tools. Today is {today.isoformat()}.
-The archive has every IPL match from 2008 to the latest completed season (ball by ball).
-Rules:
-- If the question is about ONE specific match (a final, a named game, its scorecard, momentum, commentary, who won a particular match), call {MATCH_ROUTE}.
-- Otherwise call one or more stats tools (at most {MAX_CALLS}). To compare two players, call a tool for each, or batter_vs_bowler for a batter against a bowler.
-- "Orange Cap" = batting_leaders sort runs; "Purple Cap" = bowling_leaders sort wkts. "Who won IPL <year>" = champions.
-- For strike-rate or economy rankings without a stated minimum, leave min_balls out (the tool applies one).
-- year: '2016', a range '2016-2018', or omitted for all time. 'This season' = {today.year}; 'last season' = {today.year - 1}.
-- Team codes: {teams}.
-- Use players' full names. Do not answer in text; only call tools.
+    return f"""Route IPL questions to tools; call tools only, never answer in text. Today: {today.isoformat()}.
+Archive: every IPL match 2008 onwards, ball by ball.
+- ONE specific match (a final, a named game, its scorecard/momentum/commentary) -> {MATCH_ROUTE}.
+- Otherwise 1-{MAX_CALLS} stats calls. Compare two players: one call each.
+- year: 2016, 2016-2018, or omit for all time. This season = {today.year}, last season = {today.year - 1}.
+- Teams: CSK MI RCB KKR SRH RR PBKS(Kings XI Punjab) DC(Delhi Daredevils) GT LSG DCH(Deccan) GL RPS PWI KTK.
+- Use full player names; a bare surname that fits several players ("Sharma", "Patel") -> pass it as written.
 Examples:
-- "best death bowlers in 2024" -> phase_leaders(phase=death, role=bowl, year=2024)
-- "compare Dhoni and Pant as batters" -> player_profile(name=MS Dhoni), player_profile(name=Rishabh Pant)
-- "how has Kohli done against Bumrah" -> batter_vs_bowler(batter=Virat Kohli, bowler=Jasprit Bumrah)
-- "who won IPL 2019" -> champions(year=2019)
-- "how many titles has CSK won" -> team_seasons(team=CSK)
-- "most economical bowler for MI" -> bowling_leaders(sort=econ, team=MI)
-- "who won the 2016 final" / "momentum in the 2025 final" / "RCB vs PBKS scorecard" -> route_to_match"""
+best death bowlers 2024 -> phase_leaders(phase=death, role=bowl, year=2024)
+compare Dhoni and Pant -> player_profile(MS Dhoni), player_profile(Rishabh Pant)
+Kohli against Bumrah -> batter_vs_bowler(Virat Kohli, Jasprit Bumrah)
+who won IPL 2019 -> champions(year=2019) | how many titles has CSK won -> team_seasons(team=CSK)
+Bumrah's wickets -> player_profile(Jasprit Bumrah) | sixes hit in IPL 2024 -> season_summary(year=2024)
+highest total at the Kotla -> venue_stats(name=Kotla) | most runs 2008 to 2025 -> batting_leaders(year=2008-2025)
+Orange Cap = batting_leaders sort runs; Purple Cap = bowling_leaders sort wkts."""
 
 
 def llm_plan(router: Any, question: str, history: list[dict[str, str]] | None = None) -> tuple[list[dict[str, Any]], str, str]:
@@ -525,6 +520,9 @@ def plan(question: str, entities: dict[str, Any], router: Any = None, history: l
         try:
             calls, provider, model = llm_plan(router, question, history)
             planner = f"{provider} ({model})"
+            calls, dropped = ground_calls(calls, question, entities, history)
+            if dropped:
+                note = f"Dropped LLM calls not grounded in the question: {'; '.join(dropped)}."
         except RuntimeError as exc:
             note = f"LLM planner unavailable ({str(exc)[:100]})."
     if mode in ("hybrid", "rules"):
@@ -535,11 +533,44 @@ def plan(question: str, entities: dict[str, Any], router: Any = None, history: l
     return calls, planner, note
 
 
+def ground_calls(calls: list[dict[str, Any]], question: str, entities: dict[str, Any],
+                 history: list[dict[str, str]] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    """Keep only what the question supports: a player the planner names must be named in the question
+    (or the recent conversation), and a year must be one the question states. The same idea as the
+    numeric grounding check, applied to the plan."""
+    context = _norm(" ".join([question, *(str(h.get("content", "")) for h in (history or [])[-4:]
+                                          if h.get("role") != "assistant")]))
+    years = sorted(entities.get("years") or [])
+    kept, dropped = [], []
+    for call in calls:
+        args = dict(call.get("args") or {})
+        names = [str(args[k]) for k in ("name", "batter", "bowler") if args.get(k)]
+        missing = [n for n in names if _norm(n).split() and _norm(n).split()[-1] not in context.split()]
+        if missing:
+            dropped.append(f"{call['name']}({', '.join(missing)})")
+            continue
+        year = str(args.get("year") or "").strip()
+        if year and YEAR_PATTERN.match(year):
+            low, high = (int(p) for p in (year.split("-") + [year])[:2])
+            if years and (low < years[0] or high > years[-1]):
+                args["year"] = _year_arg(years)["year"]   # the question's own year wins
+            elif not years and not TIME_WORDS.search(question.casefold()):
+                args.pop("year")                      # the question never mentions a time
+        kept.append({**call, "args": args})
+    return kept, dropped
+
+
 def prefer_rules(llm_calls: list[dict[str, Any]], rule_calls: list[dict[str, Any]]) -> bool:
     """Use the keyword plan when the LLM chose nothing, or chose the same tool for fewer subjects
     (e.g. one player profile when the question compares two)."""
     if not llm_calls:
         return True
+    named = {str(v).casefold() for c in rule_calls for k, v in (c.get("args") or {}).items()
+             if k in ("name", "batter", "bowler")}
+    looked_at = {str(v).casefold() for c in llm_calls for k, v in (c.get("args") or {}).items()
+                 if k in ("name", "batter", "bowler")}
+    if named and not looked_at:
+        return True                                   # the question names a player the LLM plan never looks at
     same_tool = {c["name"] for c in llm_calls} == {c["name"] for c in rule_calls}
     return same_tool and len(rule_calls) > len(llm_calls)
 
