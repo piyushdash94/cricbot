@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from difflib import SequenceMatcher
 import re
+from functools import lru_cache
 from typing import Any
 
 
@@ -76,8 +77,14 @@ FUZZY_TEAM_BLOCKLIST = {
 }
 
 
+@lru_cache(maxsize=8192)
+def _phrase_pattern(phrase: str) -> re.Pattern[str]:
+    return re.compile(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])")
+
+
 def _contains_phrase(text: str, phrase: str) -> bool:
-    return bool(re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", text))
+    # Compiled once per phrase: the alias lists are fixed, and re's own cache (512) is too small for them.
+    return phrase in text and _phrase_pattern(phrase).search(text) is not None
 
 
 def _exact_entities(text: str, aliases: dict[str, tuple[str, ...]]) -> list[str]:

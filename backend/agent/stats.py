@@ -162,20 +162,51 @@ class PlayerIndex:
         seen = {p.player_id: p for p in [*self.keys.get(key, []), *self.first.get(key, [])]}
         return list(seen.values())
 
+    def _tables(self) -> dict[str, Any]:
+        """Lookup tables built once per index (and rebuilt if keys change, as tests do by hand).
+
+        scan() used to try every name key (~2,500) as its own regex on every call, which overflowed
+        Python's regex cache and recompiled them all: about 450 ms per question. Looking up the
+        question's own 1-4 word runs in a dict gives the same matches in well under a millisecond."""
+        stamp = (len(self.players), len(self.keys), len(self.first))
+        cached = getattr(self, "_cache", None)
+        if cached and cached["stamp"] == stamp:
+            return cached
+        norms = {p.player_id: _norm(p.name) for p in self.players}
+        by_norm: dict[str, list[Player]] = {}
+        for p in self.players:
+            by_norm.setdefault(norms[p.player_id], []).append(p)
+        nicknames = {key: by_norm.get(_norm(full), []) for key, full in NICKNAMES.items()}
+        keys = {**{k: v for k, v in self.first.items() if k not in self.keys}, **self.keys,
+                **{k: v for k, v in nicknames.items() if v}}
+        # Same order and filters the regex version used: longest key first, short and everyday words skipped.
+        order = sorted(keys, key=len, reverse=True)
+        scan_keys = {}
+        for rank, key in enumerate(order):
+            if (len(key) < 4 and key not in NICKNAMES) or key in COMMON_WORDS:
+                continue
+            player, _ = _dominant(keys[key] if key in nicknames else self._candidates(key))
+            scan_keys[key] = (rank, player, key in self.keys)
+        self._cache = {"stamp": stamp, "norms": norms, "by_norm": by_norm, "scan": scan_keys,
+                       "max_words": max((k.count(" ") + 1 for k in scan_keys), default=1), "memo": {}}
+        return self._cache
+
     def lookup(self, name: str) -> tuple[Player | None, list[Player]]:
         """(player, []) when the name is clear, (None, candidates) when it is ambiguous or unknown."""
         text = _norm(name)
         if not text:
             return None, []
+        tables = self._tables()
+        norms = tables["norms"]
         text = _norm(NICKNAMES.get(text, text))
-        exact = [p for p in self.players if _norm(p.name) == text]
+        exact = tables["by_norm"].get(text, [])
         if len(exact) == 1:
             return exact[0], []
         tokens = text.split()
         # "Virat Kohli" against Cricsheet's "V Kohli": same surname, same first initial.
         if len(tokens) >= 2:
             surname = " ".join(tokens[1:])
-            initial = [p for p in self.keys.get(surname, []) if _norm(p.name)[:1] == tokens[0][:1]]
+            initial = [p for p in self.keys.get(surname, []) if norms[p.player_id][:1] == tokens[0][:1]]
             if len(initial) == 1:
                 return initial[0], []
             if initial:
@@ -184,33 +215,47 @@ class PlayerIndex:
                 return _dominant(self.keys[surname])
         candidates = self._candidates(text)
         if not candidates:
-            candidates = [p for p in self.players if text in _norm(p.name)]
+            candidates = [p for p in self.players if text in norms[p.player_id]]
         return _dominant(candidates) if candidates else (None, [])
 
     def scan(self, text: str) -> tuple[list[Player], list[str]]:
         """Players named in free text in order of appearance, and surnames that fit several players."""
-        lowered = f" {_norm(text)} "
+        tables = self._tables()
+        memo = tables["memo"]
+        if text in memo:                              # planner, grounding and matchup checks scan the same text
+            found_players, ambiguous_keys = memo[text]
+            return list(found_players), list(ambiguous_keys)
+        tokens = _norm(text).split()
+        starts, pos = [], 1                           # character offsets in " " + normalized + " "
+        for token in tokens:
+            starts.append(pos)
+            pos += len(token) + 1
+        scan_keys = tables["scan"]
+        hits = []
+        for i in range(len(tokens)):
+            for n in range(1, min(tables["max_words"], len(tokens) - i) + 1):
+                key = " ".join(tokens[i:i + n])
+                if key in scan_keys:
+                    rank, player, shared_surname = scan_keys[key]
+                    hits.append((rank, starts[i], starts[i] + len(key), key, player, shared_surname))
+        hits.sort(key=lambda h: (h[0], h[1]))         # longest key first, then left to right
         found: list[tuple[int, Player]] = []
         ambiguous: list[str] = []
         taken: list[tuple[int, int]] = []
-        nicknames = {key: [p for p in self.players if _norm(p.name) == _norm(full)] for key, full in NICKNAMES.items()}
-        keys = {**{k: v for k, v in self.first.items() if k not in self.keys}, **self.keys,
-                **{k: v for k, v in nicknames.items() if v}}
-        for key in sorted(keys, key=len, reverse=True):
-            if (len(key) < 4 and key not in NICKNAMES) or key in COMMON_WORDS:
+        for _, a, b, key, player, shared_surname in hits:
+            if any(x < b and a < y for x, y in taken):
                 continue
-            for match in re.finditer(rf"(?<=[ ]){re.escape(key)}(?=[ ])", lowered):
-                span = (match.start(), match.end())
-                if any(a < span[1] and span[0] < b for a, b in taken):
-                    continue
-                player, _ = _dominant(keys[key] if key in nicknames else self._candidates(key))
-                taken.append(span)
-                if player is None:
-                    if key in self.keys:              # a shared surname asks; a shared first name ("Chris") is skipped
-                        ambiguous.append(key)
-                elif all(player.player_id != p.player_id for _, p in found):
-                    found.append((span[0], player))
-        return [player for _, player in sorted(found, key=lambda item: item[0])], ambiguous
+            taken.append((a, b))
+            if player is None:
+                if shared_surname:                    # a shared surname asks; a shared first name ("Chris") is skipped
+                    ambiguous.append(key)
+            elif all(player.player_id != p.player_id for _, p in found):
+                found.append((a, player))
+        result = ([player for _, player in sorted(found, key=lambda item: item[0])], ambiguous)
+        if len(memo) > 512:
+            memo.clear()
+        memo[text] = result
+        return list(result[0]), list(result[1])
 
     def mentioned(self, text: str) -> list[Player]:
         return self.scan(text)[0]
