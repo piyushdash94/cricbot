@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+from functools import lru_cache
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -398,6 +399,75 @@ def clarify_card(results: list[dict[str, Any]], question: str) -> dict[str, Any]
     return {"type": "clarify", "title": f"Which {name.strip().title()}?", "name": name, "options": options}
 
 
+# ----------------------------------------------------------------- follow-ups
+
+FOLLOW_UP_START = re.compile(r"^\s*(and|what about|how about|same for|also|then|ok,? and)\b", re.IGNORECASE)
+PRONOUN = re.compile(r"\b(he|him|his|she|her|they|them|their)\b", re.IGNORECASE)
+
+
+def contextualize(question: str, history: list[dict[str, str]] | None, index: PlayerIndex | None = None) -> str:
+    """Rewrite a follow-up as a standalone question, using the conversation so far.
+
+        "How many runs did Virat Kohli score in IPL 2016?" + "And in 2017?"
+            -> "How many runs did Virat Kohli score in IPL 2017?"
+        "Tell me about MS Dhoni's IPL batting" + "What's his strike rate in the death overs?"
+            -> "What's MS Dhoni's strike rate in the death overs?"
+
+    The same job LangChain's history-aware retriever gives an LLM, done with rules so it also works
+    without one and can be tested. A question that already stands alone is returned unchanged."""
+    users = [str(h.get("content", "")) for h in (history or []) if h.get("role") != "assistant"]
+    if not users or not question.strip():
+        return question
+    index = index or player_index()
+    text = question.strip()
+    players = index.scan(text)[0]
+    teams = _teams(text.casefold())
+    years = re.findall(r"\b(?:19|20)\d\d\b", text)
+
+    # 1. A pronoun with no player named: "his", "him", "he" -> the last player the conversation named.
+    if PRONOUN.search(text) and not players:
+        named = next((found for turn in reversed([*users, *(str(h.get("content", "")) for h in history or []
+                                                            if h.get("role") == "assistant")])
+                      if (found := index.scan(turn)[0])), [])
+        if named:
+            name = named[0].name
+            return PRONOUN.sub(lambda m: f"{name}'s" if m.group(1).lower() in ("his", "her", "their") else name,
+                               text, count=1)
+        return question
+
+    # 2. An elliptical follow-up ("And in 2017?", "What about Bumrah?"): the previous question with the new
+    #    year, player or team swapped in. Long questions that name their own subject stand alone.
+    rest = re.sub(r"\b(?:19|20)\d\d\b", " ", _norm(text))
+    for player in players:
+        for key in _name_keys(player.name):
+            rest = re.sub(rf"\b{re.escape(key)}\b", " ", rest)
+    rest = {w for w in rest.split() if w not in ("in", "for", "the", "ipl", "season", "s", *TEAM_NAMES, *map(str.lower, teams))}
+    elliptical = FOLLOW_UP_START.search(text) or not rest   # "2017?", "Bumrah?": only a new subject or year
+    if not elliptical or not (years or players or teams):
+        return question
+    base = users[-1]
+    out = base
+    if years:
+        old = re.findall(r"\b(?:19|20)\d\d\b", base)
+        if old:
+            out = re.sub(r"\b(?:19|20)\d\d\b(?:\s*(?:-|to)\s*(?:19|20)\d\d\b)?", "-".join(years[:2]), out, count=1)
+        else:
+            out = f"{out.rstrip(' ?.')} in {'-'.join(years[:2])}?"
+    if players:
+        prev = index.scan(base)[0]
+        if prev:
+            for key in sorted(_name_keys(prev[0].name), key=len, reverse=True):
+                pattern = re.compile(rf"(?<![A-Za-z]){re.escape(key)}(?![A-Za-z])", re.IGNORECASE)
+                if pattern.search(out):
+                    out = pattern.sub(players[0].name, out, count=1)
+                    break
+    if teams:
+        prev_teams = _teams(base.casefold())
+        if prev_teams:
+            out = re.sub(rf"\b{re.escape(prev_teams[0])}\b", teams[0], out, count=1, flags=re.IGNORECASE)
+    return out if out != base else question
+
+
 # ----------------------------------------------------------------- scope
 
 SCOPE_RULES: list[tuple[str, str]] = [
@@ -512,9 +582,12 @@ def _pick_block(blocks: list[dict[str, Any]], question: str) -> dict[str, Any] |
                              "maidens", "bowler"})
     bat_cue = bool(words & {"runs", "strike", "sr", "sixes", "fours", "batting", "score", "scored", "fifties",
                             "hundreds", "fast", "batter", "knock"})
+    asked_phase = _phase_in(question.casefold().replace("-", " "))
     def score(block: dict[str, Any]) -> int:
         title = set(re.findall(r"[a-z]+", block["title"].casefold()))
         extra = sum(len(syn & title) for key, syn in synonyms.items() if key in words)
+        if asked_phase and "phase" in title:
+            extra += 5                                # "at the death": the by-phase table, not the career total
         role = 3 if ("batting" in title and bat_cue and not bowl_cue) or ("bowling" in title and bowl_cue) else \
             -2 if ("bowling" in title and bat_cue and not bowl_cue) else 0
         return len(words & title) + extra + role
@@ -583,6 +656,10 @@ def summary(results: list[dict[str, Any]], question: str = "") -> str:
                 chosen = (min if lowest else max)(numeric, key=lambda r: r[cols.index(column)]) if numeric else None
             chosen = chosen or rows[-1]
             parts.append(f"{block['title']}: {chosen[0]} — {_describe(cols, chosen, 1, lead(cols))}.")
+            continue
+        if cols[0] == "phase" and (ph := _phase_in(text.replace("-", " "))):
+            row = next((r for r in rows if r[0] == ph), rows[0])
+            parts.append(f"{block['title']}: {row[0]} — {_describe(cols, row, 1, lead(cols))}.")
             continue
         if len(rows) == 1 or cols[0] == "ground":
             parts.append(f"{block['title']}: {rows[0][0]} — {_describe(cols, rows[0], 1)}.")
@@ -820,8 +897,20 @@ MATCH_WORDS = ("final", "qualifier", "eliminator", "match on", "scorecard", "bal
                "commentary", "momentum", "this match", "that match", "the match")
 
 
+def _phase_in(text: str) -> str | None:
+    """The phase a question names: "at the death", "powerplay", "overs 16 to 20"."""
+    return next((PHASES[w] for w in sorted(PHASES, key=len, reverse=True) if _has(text, w)), None) \
+        or next((name for pattern, name in PHASE_OVERS if pattern.search(text)), None)
+
+
+@lru_cache(maxsize=4096)
+def _word_pattern(word: str) -> re.Pattern[str]:
+    return re.compile(rf"(?<![a-z]){re.escape(word)}(?![a-z])")
+
+
 def _has(text: str, *words: str) -> bool:
-    return any(re.search(rf"(?<![a-z]){re.escape(w)}(?![a-z])", text) for w in words)
+    # The cheap substring test skips the regex for the ~95% of words that are not in the text at all.
+    return any(w in text and _word_pattern(w).search(text) for w in words)
 
 
 def _year_arg(years: list[int]) -> dict[str, str]:
@@ -862,7 +951,8 @@ def rule_plan(question: str, entities: dict[str, Any], index: PlayerIndex | None
         return [{"name": "player_profile", "args": {"name": p.name, **year}} for p in players[:2]]
     phase = next((PHASES[w] for w in sorted(PHASES, key=len, reverse=True) if _has(text, w)), None) \
         or next((name for pattern, name in PHASE_OVERS if pattern.search(text)), None)
-    if phase and (leader or _has(text, "bowler", "bowlers", "batter", "batters", "batsmen", "economy", "strike rate")):
+    one_player = len(players) == 1 and not leader      # "Dhoni's strike rate at the death" is his profile, not a ranking
+    if phase and not one_player and (leader or _has(text, "bowler", "bowlers", "batter", "batters", "batsmen", "economy", "strike rate")):
         role = "bowl" if _has(text, "bowler", "bowlers", "bowling", "bowled", "bowl", "economy", "economical",
                               "wickets") else "bat"
         return [{"name": "phase_leaders", "args": {"phase": phase, "role": role, **year}}]

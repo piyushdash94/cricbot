@@ -176,7 +176,7 @@ def run_v2(items: list[dict[str, Any]], planner: str, answer: bool, sleep: float
     rows = []
     for n, item in enumerate(items, 1):
         started = time.time()
-        result = agent.answer(item["question"])
+        result = agent.answer(item["question"], history=item.get("history") or None)
         step = next(e for e in result["trace"] if e["node"] == "plan_question")["patch"]
         calls, used = step.get("calls") or [], step.get("planner") or ""
         reply = result["reply"].replace("\u202f", " ")
@@ -245,7 +245,7 @@ def run(items: list[dict[str, Any]], planner: str, answer: bool, db: str, sleep:
         reply, validation, provider = "", "", ""
         if agent and item["expected_route"] == "stats":
             # One pass through the real graph: its plan_question node is the plan being scored.
-            result = agent.answer(item["question"])
+            result = agent.answer(item["question"], history=item.get("history") or None)
             step = next(e for e in result["trace"] if e["node"] == "plan_question")["patch"]
             calls, used, note = step.get("calls") or [], step.get("planner") or "", ""
             route = step.get("route") or "match"

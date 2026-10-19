@@ -459,3 +459,35 @@ def test_graph_answers_an_ambiguous_name_with_choices(db, monkeypatch):
     assert [c["type"] for c in result["cards"]] == ["clarify"]
     assert [o["label"] for o in result["cards"][0]["options"]] == ["Hardik Pandya", "Krunal Pandya"]
     assert "which one" in result["reply"]
+
+
+# ----------------------------------------------------------------- follow-ups
+
+@pytest.mark.parametrize("history, question, standalone", [
+    (["How many runs did Virat Kohli score in IPL 2016?"], "And in 2017?",
+     "How many runs did Virat Kohli score in IPL 2017?"),
+    (["Who took the most wickets in IPL 2018?"], "What about 2019?", "Who took the most wickets in IPL 2019?"),
+    (["Tell me about MS Dhoni's IPL batting"], "What's his strike rate in the death overs?",
+     "What's MS Dhoni's strike rate in the death overs?"),
+    (["How many runs did Virat Kohli score in IPL 2016?"], "What about Bumrah?",
+     "How many runs did Jasprit Bumrah score in IPL 2016?"),
+    (["Most sixes in IPL"], "and in 2024?", "Most sixes in IPL in 2024?"),
+    # Questions that stand alone are left alone.
+    (["How many runs did Virat Kohli score in IPL 2016?"], "Who won IPL 2019?", "Who won IPL 2019?"),
+    (["Tell me about MS Dhoni"], "Jasprit Bumrah's economy in 2024", "Jasprit Bumrah's economy in 2024"),
+    ([], "And in 2017?", "And in 2017?"),
+])
+def test_follow_ups_become_standalone_questions(history, question, standalone):
+    turns = [{"role": "user", "content": h} for h in history]
+    assert stats.contextualize(question, turns, _index()) == standalone
+
+
+def test_graph_answers_a_follow_up_from_history(db):
+    from backend.agent.service import CricbotAgent
+
+    agent = CricbotAgent(llm=FakeRouter(fail_plan=True))
+    result = agent.answer("And in 2025?", history=[{"role": "user", "content": "Who hit the most sixes in IPL 2024?"},
+                                                   {"role": "assistant", "content": "Abhishek Sharma, 42."}])
+    first = next(e for e in result["trace"] if e["node"] == "normalize_request")
+    assert "rewritten" in first["summary"] and "2025" in first["summary"]
+    assert result["cards"][0]["type"] == "stats" and "sixes" in result["reply"]
