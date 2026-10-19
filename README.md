@@ -7,12 +7,15 @@ The repository now has two clear surfaces:
 ```text
 cricbot/
 ├── backend/
-│   ├── agent/         # Pandit orchestration, Gemma client, and LangChain tools
-│   ├── apis/          # FastAPI routes, schemas, and demo data
+│   ├── agent/         # Pandit orchestration, stats planner, LLM providers, LangChain tools
+│   ├── apis/          # FastAPI routes (match, agent, /api/stats), schemas, and demo data
+│   ├── db/            # DuckDB archive: load, ingest, verify, and ready-made stats queries
+│   ├── eval/          # Question sets with gold answers, and the scoring runner
 │   ├── src/           # Reusable formatting and analytics engine
-│   ├── tests/         # Offline engine and API contract tests
+│   ├── tests/         # Offline engine, API, DuckDB, and stats-chat tests
 │   ├── notebooks/     # API and feature exploration
 │   └── requirements.txt
+├── demo/              # Single-process Streamlit demo
 └── frontend/
     └── ui/            # Responsive Vinext/React match-centre UI
 ```
@@ -27,6 +30,11 @@ cricbot/
 - Momentum-shift detection from deliveries and commentary: collapses, scoring bursts, squeezes, chase-equation swings, and missed chances
 - Multi-source cricket search that routes natural language to match, player, standings, and analytics tools
 - Pandit, a chat-first assistant on an observable LangGraph workflow; Groq (then OpenRouter, then local Gemma) summarises grounded match facts, and answers render match cards in the chat
+- Stats questions across every IPL match, answered from a local DuckDB archive: the LLM (or keyword rules without one) picks verified queries, SQL computes every number, and any number in the reply that is not in the tables is rejected
+- Robust question handling: first names and fan nicknames ("Rashid", "SKY"), batter and bowler in either order ("Bumrah vs Kohli"), a question back with one choice per player for shared surnames ("Pandya"), and a clear "outside the IPL archive" reply for WPL, Tests, other leagues, auctions and predictions
+- A ground report: one ground against the league in the same seasons (par score by season, phase scoring, how wickets fall, chase success)
+- A Stats workspace: leaders ranked by any stat and filtered by team, records, phases, players, matchups, teams (season by season, head to head, finals) and grounds
+- An evaluation suite of 299 questions with gold answers, scoring accuracy, completeness, entity accuracy, paraphrase consistency, clarify and refusal behaviour
 - A deterministic entity-resolution node that corrects team typos, resolves relative years, identifies teams/players/match terms/venues, carries conversational context, and preserves list intent
 - A collapsible live trace pane showing graph traversal, conditional branches, intermediate summaries, state patches, and UI actions
 - Chat-first UI: archive rail (every season, search), Pandit conversation with match and list cards, and a match workspace (overview, scorecard, ball by ball, momentum)
@@ -67,8 +75,12 @@ With the stats archive built (below), Pandit answers questions across matches as
 - "How has Kohli done against Bumrah?", "Compare Dhoni and Pant as batters"
 - "How many titles have CSK won?", "How did RCB do in 2025?", "MI vs CSK head to head"
 - "Best death bowlers in 2024", "Average first innings score at Chepauk", "Highest team total ever"
+- "What's the pitch like at Chepauk?" (ground report), "Rashid's IPL economy", "Bumrah vs Kohli"
+- "Pandya's batting record" asks which Pandya, with a button for each; "Most runs in WPL 2024" says it is outside the IPL archive
 
-The planner (LLM tool calling, with keyword rules as fallback) chooses archive queries, the tables appear under the answer, and the trace pane shows the plan and the commands. Single-match questions ("Where did the 2025 final turn?") still open the match. Accuracy is measured on a 130-question set plus a 43-question held-out set in [`backend/eval`](backend/eval/README.md).
+The planner (LLM tool calling, with keyword rules as fallback) chooses archive queries, the tables appear under the answer, and the trace pane shows the plan and the commands. Single-match questions ("Where did the 2025 final turn?") still open the match.
+
+Accuracy is measured in [`backend/eval`](backend/eval/README.md) on 299 questions. Scores on questions the code was tuned on are high (v1 development 100%, v2 robustness set 100% with keyword rules and 98% with the Groq planner). The fair numbers are the first runs on held-out questions: v1 held-out 79% (keyword rules), 84% (Groq planner) and 92% (full app, Groq planning and writing); v2 held-out 79% for both planners. In the full-app run, 35 of 38 LLM-written answers kept every number from the tables; the other 3 were replaced by the table summary.
 
 ### Ball-by-ball data (recommended)
 
@@ -96,7 +108,13 @@ The Stats view (the **∑** button, or **Stats** on mobile) and `/api/stats/*` r
 python -m backend.db.cricsheet_load --sync     # ~20 s: downloads Cricsheet and loads every IPL delivery
 ```
 
-It covers season and all-time leaders (any sort, any team), records, powerplay / middle / death splits, player profiles, batter v bowler, venues, champions, team seasons and head to head. Optionally, `python -m backend.db.ingest` adds ESPN commentary and the official scorecard for cross-checking. Details, schema and accuracy checks are in [`backend/db/README.md`](backend/db/README.md).
+It covers season and all-time leaders (any sort, any team), records, powerplay / middle / death splits, player profiles, batter v bowler, venues, a ground report, champions, team seasons and head to head. The same queries run from the command line:
+
+```bash
+python -m backend.db.queries top-batters --year 2024 --sort sixes
+python -m backend.db.queries matchup "Virat Kohli" "Jasprit Bumrah"
+python -m backend.db.queries ground chidambaram --year 2018-2025
+``` Optionally, `python -m backend.db.ingest` adds ESPN commentary and the official scorecard for cross-checking. Details, schema and accuracy checks are in [`backend/db/README.md`](backend/db/README.md).
 
 ### Frontend
 
@@ -164,6 +182,14 @@ Share the HTTPS forwarding URL printed by ngrok. The single frontend tunnel also
 | `POST` | `/api/views/standings` | Format a standings payload |
 | `POST` | `/api/views/player` | Format a player profile and career summary |
 | `POST` | `/api/views/preview` | Format a pre-match preview |
+| `GET` | `/api/stats/status` | Whether the DuckDB archive is built, and what it holds |
+| `GET` | `/api/stats/seasons` | Coverage and scoring per IPL season |
+| `GET` | `/api/stats/batting`, `/api/stats/bowling` | Leaderboards (`year`, `sort`, `team`, `min_balls`, `limit`) |
+| `GET` | `/api/stats/records`, `/api/stats/phase` | Records; powerplay / middle / death leaders |
+| `GET` | `/api/stats/players?q=...`, `/api/stats/players/{player_id}` | Player search; one player by year and by phase |
+| `GET` | `/api/stats/matchup?batter=...&bowler=...` | Every ball a batter faced from a bowler |
+| `GET` | `/api/stats/h2h`, `/api/stats/teams/{code}`, `/api/stats/champions` | Head to head, team seasons, finals and titles |
+| `GET` | `/api/stats/venues`, `/api/stats/grounds/{name}` | Grounds; one ground against the league |
 | `GET` | `/api/live` | Fetch live matches through `cricdata` |
 | `GET` | `/api/matches/{series_slug}/{match_slug}` | Fetch the complete live match bundle |
 
@@ -211,7 +237,12 @@ print(build_compact_scorecard(
 | `backend/agent/service.py` | LangGraph state, nodes, trace events, grounded responses, and UI actions |
 | `backend/agent/llm.py` | Groq/OpenRouter/Gemma provider chain, tool-call planning and `.env` loading |
 | `backend/agent/stats.py` | Stats questions: tool specs, planner (LLM + keyword rules), player index, query runner, facts and chat card |
-| `backend/eval/` | IPL question-answer evaluation set and runner |
+| `backend/db/store.py` | DuckDB schema and fast typed bulk insert |
+| `backend/db/cricsheet_load.py` | Load Cricsheet deliveries and the people register |
+| `backend/db/ingest.py`, `parse.py` | Ingest ESPN matches (scorecards, deliveries, commentary) through `cricdata` |
+| `backend/db/evaluate.py` | Check ball-by-ball data against the official scorecard |
+| `backend/db/queries.py` | Verified stats queries shared by the CLI, `/api/stats`, Pandit and the eval |
+| `backend/eval/build_qna*.py`, `run_qna.py` | Build the question sets from the archive; score Pandit on them |
 | `backend/agent/match_facts.py` | Facts sheet (for the LLM) and chat card (for the UI) for a resolved match |
 | `backend/agent/gemma.py` | Local Gemma `/v1/completions` client and readiness checks |
 | `backend/apis/main.py` | FastAPI application and provider routes |
@@ -233,6 +264,14 @@ cd frontend/ui
 npm test
 ```
 
+Pandit's accuracy (needs the DuckDB archive; the rules planner needs no LLM keys and takes about a minute):
+
+```bash
+python -m backend.eval.run_qna --planner rules                                          # v1 development set
+python -m backend.eval.run_qna --planner rules --dataset backend/eval/qna_ipl_v2.jsonl  # v2 robustness set
+python -m backend.eval.run_qna --planner hybrid --dataset backend/eval/qna_ipl_v2.jsonl # with the LLM planner
+```
+
 All backend tests use synthetic Cricsheet- and ESPNcricinfo-shaped payloads and mocked LLM providers. The suite needs no network access and never calls Groq or OpenRouter.
 
 ## Data notes
@@ -240,5 +279,6 @@ All backend tests use synthetic Cricsheet- and ESPNcricinfo-shaped payloads and 
 - ESPNcricinfo win probability is reported for the batting side. The helper layer inverts it when tracking one team across both innings.
 - IPL list requests are cached in-process. Match detail uses independent best-effort provider calls so one failed sub-resource does not erase a usable scorecard.
 - Delivery coverage is explicit: dedicated ball feed, historical commentary, over summaries, demo fallback, or unavailable. Historical commentary can be partial.
-- The impact and pitch models are exploratory. A single match is not enough to rate a venue; aggregate by format, season, and ground before making strong claims.
+- The per-match impact and pitch models are exploratory. A single match is not enough to rate a venue; the ground report aggregates across seasons and compares with the league in the same seasons, and it describes outcomes (surface, boundary size, dew and teams together), not the pitch itself.
+- Not yet in the archive: fielding (catches, stumpings, run outs are in the raw Cricsheet files but not loaded), bowling style, awards, and ball speed.
 - Data comes from ESPNcricinfo through the unaffiliated `cricdata` package. Review the provider's terms before public deployment.
