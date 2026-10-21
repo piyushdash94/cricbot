@@ -32,6 +32,7 @@ cricbot/
 - Pandit, a chat-first assistant on an observable LangGraph workflow; Groq (then OpenRouter, then local Gemma) summarises grounded match facts, and answers render match cards in the chat
 - Stats questions across every IPL match, answered from a local DuckDB archive: the LLM (or keyword rules without one) picks verified queries, SQL computes every number, and any number in the reply that is not in the tables is rejected
 - Robust question handling: first names and fan nicknames ("Rashid", "SKY"), batter and bowler in either order ("Bumrah vs Kohli"), a question back with one choice per player for shared surnames ("Pandya"), and a clear "outside the IPL archive" reply for WPL, Tests, other leagues, auctions and predictions
+- Follow-up questions: "And in 2017?" or "What's his strike rate at the death?" are rewritten into a standalone question from the conversation before planning, so they work with or without an LLM
 - A ground report: one ground against the league in the same seasons (par score by season, phase scoring, how wickets fall, chase success)
 - A Stats workspace: leaders ranked by any stat and filtered by team, records, phases, players, matchups, teams (season by season, head to head, finals) and grounds
 - An evaluation suite of 299 questions with gold answers, scoring accuracy, completeness, entity accuracy, paraphrase consistency, clarify and refusal behaviour

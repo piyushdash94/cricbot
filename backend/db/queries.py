@@ -36,6 +36,7 @@ Views available to `sql`:
 from __future__ import annotations
 
 import argparse
+from functools import lru_cache
 import csv
 import sys
 from pathlib import Path
@@ -159,7 +160,7 @@ BOWLING_AGG = """
 # ----------------------------------------------------------------- queries
 
 def seasons(q: "Q", a: argparse.Namespace) -> None:
-    q.table("Per IPL year (balls-based stats exclude super overs)", f"""
+    q.table("Per IPL year (balls-based stats exclude super overs)", """
         WITH listed AS (
             SELECT year(start_date) AS year, count(*) AS listed FROM matches GROUP BY 1
         ), inn AS (
@@ -227,6 +228,11 @@ def top_bowlers(q: "Q", a: argparse.Namespace) -> None:
 
 def _resolve_player(q: "Q", name: str) -> tuple[int, str] | None:
     """A unique player for a name or id; otherwise a note or a table of candidates, and None."""
+    if str(name).strip().isdigit():
+        # The agent always passes an id: read the name directly instead of searching every innings.
+        row = q.rows("SELECT player_id, name AS player FROM pnames WHERE player_id = $pid", pid=int(name))
+        if row and row[0]["player"]:
+            return row[0]["player_id"], row[0]["player"]
     found = q.rows(PLAYER_SEARCH, name=str(name))
     tokens = str(name).split()
     if not found and len(tokens) >= 2:
@@ -329,7 +335,7 @@ def phase(q: "Q", a: argparse.Namespace) -> None:
 def matches(q: "Q", a: argparse.Namespace) -> None:
     q.params["team"] = q.team(a.team)
     q.params["vs"] = q.team(a.vs)
-    q.table(f"Matches {q.span}", f"""
+    q.table(f"Matches {q.span}", """
         SELECT m.match_id, m.start_date AS date, m.title, franchise(m.team1) AS team1, franchise(m.team2) AS team2,
                m.status_text AS result,
                coalesce((SELECT any_value(source) FROM src WHERE src.match_id = m.match_id), 'no balls') AS data
@@ -528,12 +534,12 @@ def ground_report(q: "Q", a: argparse.Namespace) -> None:
 
 
 def champions(q: "Q", a: argparse.Namespace) -> None:
-    q.table(f"IPL finals {q.span}", f"""
+    q.table(f"IPL finals {q.span}", """
         SELECT year(start_date) AS year, franchise(winner) AS champion,
                CASE WHEN franchise(winner) = franchise(team1) THEN franchise(team2) ELSE franchise(team1) END AS runner_up,
                status_text AS result, ground(venue) AS ground, match_id
         FROM matches WHERE title = 'Final' AND year(start_date) BETWEEN $y0 AND $y1 ORDER BY year""")
-    q.table(f"Titles by team {q.span}", f"""
+    q.table(f"Titles by team {q.span}", """
         SELECT franchise(winner) AS team, count(*) AS titles, string_agg(CAST(year(start_date) AS VARCHAR), ', ' ORDER BY start_date) AS years
         FROM matches WHERE title = 'Final' AND year(start_date) BETWEEN $y0 AND $y1
         GROUP BY 1 ORDER BY titles DESC, team LIMIT $limit""")
@@ -784,9 +790,15 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+@lru_cache(maxsize=1)
+def _parser() -> argparse.ArgumentParser:
+    # Built once: 17 subcommands cost ~10 ms to build, and parse_args returns a fresh Namespace each call.
+    return build_parser()
+
+
 def run(argv: list[str], db: str | Path | None = None) -> list[dict[str, Any]]:
     """Run a command (same arguments as the CLI) and return its output blocks. Used by the API."""
-    a = build_parser().parse_args(argv)
+    a = _parser().parse_args(argv)
     if db is not None:
         a.db = str(db)
     q = Q(a)

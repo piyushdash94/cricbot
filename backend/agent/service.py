@@ -1,6 +1,5 @@
 """LangGraph orchestration for grounded cricket chat and observable UI control."""
 
-import json
 import os
 import re
 from collections.abc import Iterator
@@ -42,6 +41,8 @@ Rules:
 - If the tables do not answer the question, say what is missing in one sentence.
 - Write natural sentences. Do not say "rank 1", "row", "Total row" or raw column names (6s, sr, econ); say "sixes",
   "strike rate", "economy", "in all".
+- State facts as facts: never refer to the tables themselves ("the table shows", "as shown in").
+- Write every number as digits ("5 times", not "five times"), so each one can be checked.
 - At most five sentences. Plain text, no markdown tables or headings."""
 
 
@@ -240,10 +241,18 @@ class CricbotAgent:
             f"{item.get('role', 'user').title()}: {item.get('content', '')[:500]}"
             for item in state.get("history", [])[-6:]
         ) or "No previous messages."
+        message = state["message"].strip()
+        query = message
+        if state.get("history") and stats.available():
+            try:
+                query = stats.contextualize(message, state["history"])
+            except Exception:                             # a broken archive must not break chat
+                query = message
         return {
-            "query": state["message"].strip(),
+            "query": query,
             "compact_history": compact_history,
-            "intermediate_message": "Request normalized with the current dashboard and recent chat context.",
+            "intermediate_message": (f"Follow-up rewritten as: \"{query}\"." if query != message
+                                     else "Request normalized with the current dashboard and recent chat context."),
         }
 
     @staticmethod

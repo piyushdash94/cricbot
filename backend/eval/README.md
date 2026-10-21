@@ -190,12 +190,12 @@ What changed, one fix per finding:
 
 | Metric | Rules before | Rules after | LLM planner before | LLM planner after |
 |---|---|---|---|---|
-| Paraphrase questions answered correctly | 38/60 | 60/60 | 45/60 | 58/60 |
+| Paraphrase questions answered correctly | 38/60 | 60/60 | 48/60 | 58/60 |
 | Groups right all three ways | 6/20 | 20/20 | 12/20 | 18/20 |
 | Groups with the same plan | 6/20 | 20/20 | n/a | 14/20 |
 | Entity accuracy | 37/56 | 56/56 | n/a | 56/56 |
 | Asks when the name is shared | 8/8 | 8/8 | 6/8 | 8/8 |
-| Answers when the name is clear | 3/8 | 8/8 | 6/8 | 8/8 |
+| Answers when the name is clear | 3/8 | 8/8 | 3/8 | 8/8 |
 | Refuses out-of-scope questions | 4/12 | 12/12 | 4/12 | 12/12 |
 | All questions | 53/88 (60%) | 88/88 (100%) | 61/88 (69%) | 86/88 (98%) |
 
