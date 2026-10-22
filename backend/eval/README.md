@@ -240,3 +240,34 @@ score") has no scope word to catch, so it is answered with the IPL leaderboard. 
 "is this person in the archive?" before answering a person question, not more keywords.
 
 The v1 sets after these changes (rules): development 130/130, held-out 34/38 answers (89%; was 79%).
+
+## Gaps and traps set (24 questions, `qna_ipl_traps.jsonl`)
+
+Questions that once got confidently wrong answers: 15 from user transcripts (October 2026) plus 9
+similar ones written to test the fixes. Gold answers are read from the archive. They cover over
+ranges and innings ("overs 12-20 while chasing", "the 1st over"), close finishes and targets,
+milestones ("fastest to 2000 runs", "fewest balls to 100 wickets"), a player's Nth match, a
+player's teams, ties at the top, and questions the archive cannot answer yet (awards, fielding,
+hat-tricks, team wins per player), where the right reply says so and runs no query.
+
+The failures they caught, and the fix for each:
+
+| Failure | Fix |
+|---|---|
+| A nearby question answered instead ("overs 12-20" as the death overs) | New queries for any over range and innings, match-level facts, milestones and a player's Nth match; questions the queries cannot express are named in the reply ("I can't break this down by …"), never silently substituted |
+| Counting "across the IPL" from a list of 10 matches | A whole-IPL question with no query is answered with "I can't answer that one yet", not from match search |
+| The open match's teams leaking into unrelated questions | On-screen context only applies to questions about that match |
+| An invented player name; a story that handed the win to the losing side | The grounding check now also requires every named player to be in the tables and any named winner to match the result |
+| One name crowned when three were tied | Summaries and the answer check report ties |
+| "2000 runs" read as the 2000 season | Years are 2008 to now and never a run or wicket count |
+| An LLM reply with no number although the tables answered it | Treated as a non-answer; the table summary is used |
+
+Scores: rules 24/24 (these questions shaped the fixes, so this is a development score). With
+Groq planning and writing answers, four runs scored 21, 23, 23 and 24 of 24; each miss in the
+earlier runs exposed a fix above. The two questions that need a match open on screen are covered by
+unit tests, since the runner cannot set screen context yet.
+
+```bash
+python -m backend.eval.run_qna --planner rules --dataset backend/eval/qna_ipl_traps.jsonl
+python -m backend.eval.run_qna --planner hybrid --answer --dataset backend/eval/qna_ipl_traps.jsonl
+```
