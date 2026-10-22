@@ -811,3 +811,17 @@ def test_grounding_fixes_real_llm_plan_errors():
     q = "How many hat-tricks has Amit Mishra taken?"
     kept, _ = stats.ground_calls([{"name": "hattricks", "args": {"team": "MI"}}], q, resolve_entities(q))
     assert kept[0]["args"] == {}                                         # MI is not in the question
+
+
+def test_reply_must_crown_the_top_row_and_state_the_definition():
+    block = {"type": "table", "title": "t", "columns": ["batter", "strike rate", "strike rate (shrunk)"],
+             "rows": [["AB de Villiers", 215.74, 202.91], ["Ashutosh Sharma", 239.39, 199.17]]}
+    results = [{"name": "slice_stats", "args": {"metric": "strike_rate", "shrink": True}, "blocks": [block]}]
+    wrong = "Ashutosh Sharma is the top finisher with a shrunk strike rate of 199.17. AB de Villiers follows."
+    assert not stats.crowns_top(wrong, results)                       # seen in an LLM run: names right, ranking wrong
+    assert stats.crowns_top("AB de Villiers is the top finisher (202.91), ahead of Ashutosh Sharma.", results)
+    assert stats.crowns_top("De Villiers leads with 202.91.", results)
+    assert stats.crowns_top("Ashutosh Sharma has the highest raw strike rate, 239.39, on 66 balls.", results) is False
+    definition = "Finisher = batting in overs 16-20 of chases that were won. Ranked by strike rate."
+    assert not stats.states_definition("AB de Villiers is the best finisher.", definition)
+    assert stats.states_definition("In overs 16-20 of won chases, AB de Villiers is the best.", definition)

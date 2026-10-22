@@ -296,7 +296,13 @@ run (26/32) found planner argument errors that grounding now corrects: a split n
 sum where one innings was asked for, a batter leaderboard for a league run rate, `"true"` sent as a
 string, and a team the question never named.
 
-SCORES_PLACEHOLDER
+Scores: rules 32/32 (development: these questions shaped the fixes). Hybrid planner with LLM-written
+answers: 26/32 on the first run, 31/32 after the grounding fixes, with 29 of 32 LLM answers passing the
+number check unchanged. The remaining miss crowned the second row of the table ("Ashutosh Sharma is
+the top finisher"): every name and number was real, the ranking was not. A rank check now requires
+the name a reply crowns to be the table's first (or tied-first) row, and a reply that omits a stated
+definition gets it prepended; on a recheck that answer fell back to the table summary. Groq's daily
+quota ran out mid-run, so 17 of 32 plans came from OpenRouter (Llama 3.3 70B).
 
 ```bash
 python -m backend.eval.run_qna --planner rules --dataset backend/eval/qna_ipl_v3_slices.jsonl

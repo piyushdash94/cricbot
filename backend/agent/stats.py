@@ -630,6 +630,42 @@ def top_tie(results: list[dict[str, Any]]) -> list[str]:
     return []
 
 
+CROWN = re.compile(r"\b(top|tops|leads?|leading|the most|the best|the highest|the lowest|the fewest|number one|no\. ?1)\b", re.I)
+
+
+def crowns_top(reply: str, results: list[dict[str, Any]]) -> bool:
+    """False when the reply's opening sentence crowns a name that is not first (or tied first) in the
+    leaderboard it answers from: every name and number can be in the table while the ranking is wrong."""
+    for result in results:
+        if (result.get("args") or {}).get("split"):
+            return True                                # a comparison, not a ranking
+        block = next((b for b in result.get("blocks", []) if b["type"] == "table" and b["rows"]), None)
+        if not block or block["columns"][0] not in ("player", "team", "batter", "bowler", "pair"):
+            continue
+        first = re.split(r"(?<=[.!?])\s", reply.strip())[0]
+        if not CROWN.search(first):
+            return True
+        names = [str(r[0]) for r in block["rows"]]
+        allowed = set(top_tie([result])) or {names[0]}
+        where = {}
+        for name in names:
+            for key in {name, name.split()[-1]}:
+                m = re.search(rf"(?<![A-Za-z]){re.escape(key)}(?![A-Za-z])", first)
+                if m:
+                    where[name] = min(where.get(name, m.start()), m.start())
+        if not where:
+            return True
+        return min(where, key=where.get) in allowed
+    return True
+
+
+def states_definition(reply: str, definition: str) -> bool:
+    """A definition counts as stated when the numbers in its first sentence appear in the reply."""
+    head = definition.split(". ")[0]
+    numbers = re.findall(r"\d+", head)
+    return all(re.search(rf"(?<!\d){n}(?!\d)", reply) for n in numbers) if numbers else head.casefold() in reply.casefold()
+
+
 def mentions_tie(reply: str, results: list[dict[str, Any]]) -> bool:
     """False when the table has a tie at the top and the reply crowns one name."""
     return not top_tie(results) or bool(re.search(r"\b(tie|tied|share|shared|joint|level|equal)\b", reply, re.I))
