@@ -93,6 +93,11 @@ CREATE TABLE IF NOT EXISTS cs_subs (
     match_id BIGINT, inning INTEGER, sequence BIGINT, team VARCHAR, player_in_id BIGINT, player_in VARCHAR,
     player_out_id BIGINT, player_out VARCHAR, reason VARCHAR
 );
+-- Batting hand and bowling type from ESPN scorecards (backend.db.player_styles).
+CREATE TABLE IF NOT EXISTS player_styles (
+    player_id BIGINT PRIMARY KEY, name VARCHAR, bat_hand VARCHAR, bowl_style VARCHAR, bowl_kind VARCHAR,
+    bowl_arm VARCHAR, source VARCHAR
+);
 CREATE TABLE IF NOT EXISTS players (
     player_id BIGINT, name VARCHAR, source VARCHAR, PRIMARY KEY (player_id, source)
 );
