@@ -459,3 +459,50 @@ code { font:12px var(--font-geist-mono); }
 .explore-form select { max-width:100%; }
 .explore-form label { max-width:100%; }
 .stats-card .table-wrap td,.stats-card .table-wrap th { white-space:nowrap; }
+
+/* Match analysis: runs per over against par, worm, impact bars, pitch profile */
+.over-chart { display:grid; gap:12px; }
+.over-chart figure { margin:0; display:grid; gap:4px; }
+.over-chart figcaption { display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; font-size:13px; }
+.over-chart figcaption small { color:var(--muted); font-size:11px; }
+.over-chart svg,.worm svg { width:100%; height:auto; display:block; }
+.over-chart .phase-band { fill:var(--panel2); }
+.over-chart .par-tick { stroke:var(--ink); stroke-width:2; opacity:.75; }
+.wicket-dot { fill:#ef4444; }
+.over-chart .axis,.worm .axis { fill:var(--faint); font:10px var(--font-geist-mono); }
+.worm .grid { stroke:var(--line); stroke-width:1; }
+.worm .par-line { fill:none; stroke:var(--faint); stroke-width:1.5; stroke-dasharray:4 4; }
+.worm .target-line { stroke:var(--amber); stroke-width:1.2; stroke-dasharray:6 4; }
+.worm .worm-wicket { stroke:var(--panel); stroke-width:1.5; }
+.impact-bars { display:grid; gap:6px; }
+.impact-bar { display:grid; grid-template-columns:minmax(120px, 1.1fr) 1.4fr 52px; align-items:center; gap:8px; font-size:12.5px; }
+.impact-bar .who { display:flex; align-items:center; gap:6px; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.impact-bar .who i { width:8px; height:8px; border-radius:50%; flex:none; }
+.impact-bar .who small { color:var(--faint); font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; }
+.impact-bar .track { position:relative; height:12px; border-radius:3px; background:var(--panel2); }
+.impact-bar .track::after { content:""; position:absolute; left:50%; top:-2px; bottom:-2px; width:1px; background:var(--line2); }
+.impact-bar .track b { position:absolute; top:0; bottom:0; border-radius:3px; }
+.impact-bar .track b.pos { background:var(--green); }
+.impact-bar .track b.neg { background:var(--amber); }
+.impact-bar strong { text-align:right; font:600 12px var(--font-geist-mono); }
+.impact-bar strong.pos { color:var(--green); }
+.impact-bar strong.neg { color:var(--amber); }
+.pitch-card h4 { margin:0 0 6px; font-size:12.5px; }
+.pitch-card h4 small { color:var(--faint); font-weight:500; margin-left:4px; }
+.pitch-verdict { margin:0 0 10px; font-size:13.5px; line-height:1.5; }
+.pitch-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(230px, 1fr)); gap:14px; }
+.pitch-row { display:grid; grid-template-columns:72px 1fr 40px 54px; gap:8px; align-items:center; font-size:12px; margin-bottom:5px; }
+.pitch-row span { color:var(--muted); text-transform:capitalize; }
+.pitch-row b { text-align:right; font:600 12px var(--font-geist-mono); }
+.pitch-row small { color:var(--faint); font:11px var(--font-geist-mono); }
+.pair-bars { display:grid; gap:2px; }
+.pair-bars i { display:block; height:6px; border-radius:3px; }
+.pair-bars i.here { background:var(--green); }
+.pair-bars i.league { background:var(--line2); }
+.pitch-cues { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:10px 0 4px; }
+.pitch-cues h4 { width:100%; margin:0; }
+.pitch-cues span { padding:3px 8px; border:1px solid var(--line2); border-radius:999px; font-size:12px; cursor:help; }
+.pitch-cues b { color:var(--green); font-family:var(--font-geist-mono); }
+/* Data bars: the ranking column of a leaderboard gets a proportional bar */
+.databar { position:relative; display:inline-block; min-width:52px; padding:0 4px; }
+.databar::before { content:""; position:absolute; inset:2px auto 2px 0; width:var(--w); border-radius:2px; background:var(--green); opacity:.16; }

@@ -203,6 +203,15 @@ def test_stats_api_slices_and_match_facts(api):
     chase = get("slice", metric="runs", innings=2, result="lost", shrink=1, min_balls=0)  # query values arrive as strings
     assert chase.status_code == 200 and "chasing" in chase.json()["blocks"][0]["title"]
     assert get("partnerships", innings=1, by="pair").status_code == 200
+    # Every slice filter must reach the query: FastAPI silently drops a parameter the endpoint does not declare.
+    import inspect
+    from backend.apis.stats import slice_stats
+    from backend.db import analytics
+    declared = set(inspect.signature(slice_stats).parameters)
+    flags = {a.dest for a in queries._parser()._subparsers._group_actions[0].choices["slice"]._actions} - {"help", "db", "csv", "fn"}
+    assert flags <= declared, flags - declared
+    per_match = get("slice", subject="league", metric="runs", per="match").json()["blocks"][0]
+    assert per_match["rows"][0][per_match["columns"].index("runs")] == 286 + 242
     assert get("partnerships", limit=1).json()["blocks"][0]["rows"][0][1] == 111
     assert get("hattricks").json()["blocks"][-1]["text"].startswith("0 hat-tricks")
     assert get("awards").json()["blocks"][0]["rows"][0][:2] == ["Ishan Kishan", 1]

@@ -25,6 +25,7 @@ are not like-for-like.
 from __future__ import annotations
 
 import argparse
+import re
 from typing import Any
 
 STATE_VIEWS = """
@@ -99,19 +100,26 @@ METRICS = {
     "dot_pct": ("DOT", "B", 100, True, "dot-ball %"),
     "six_pct": ("S6", "B", 100, True, "sixes per 100 balls"),
     "balls_per_boundary": ("B", "BND", 1, False, "balls per boundary"),
+    "dots": ("DOT", None, 1, True, "dot balls"),
+    "boundaries": ("BND", None, 1, True, "boundaries"),
     # Innings-level: the best single innings in the slice ("highest score in finals", "highest total chasing").
     "high_score": ("R", None, 1, True, "highest score"),
+    # Innings-level counts: innings that were a duck (0 and out), 50-99, or 100+.
+    "ducks": ("DUCK", None, 1, True, "ducks"),
+    "fifties": ("FIFTY", None, 1, True, "fifties"),
+    "hundreds": ("HUNDRED", None, 1, True, "hundreds"),
 }
+INNINGS_COUNTS = {"ducks": "runs = 0 AND is_out", "fifties": "runs BETWEEN 50 AND 99", "hundreds": "runs >= 100"}
 # Which metrics make sense for which side (the planner may ask for "economy" of a batter: refuse).
 SIDE_METRICS = {
     "batter": {"runs", "sixes", "fours", "balls", "strike_rate", "average", "boundary_pct", "dot_pct", "six_pct",
-               "balls_per_boundary", "wickets", "high_score"},
+               "balls_per_boundary", "wickets", "high_score", "dots", "boundaries", "ducks", "fifties", "hundreds"},
     "batting_team": {"runs", "sixes", "fours", "balls", "run_rate", "strike_rate", "average", "boundary_pct",
-                     "dot_pct", "six_pct", "wickets", "high_score"},
+                     "dot_pct", "six_pct", "wickets", "high_score", "dots", "boundaries"},
     "bowler": {"wickets", "runs", "sixes", "fours", "balls", "economy", "bowling_average", "bowling_strike_rate",
-               "dot_pct", "boundary_pct", "average", "strike_rate"},
+               "dot_pct", "boundary_pct", "average", "strike_rate", "dots", "boundaries"},
     "bowling_team": {"wickets", "runs", "sixes", "fours", "balls", "economy", "bowling_average",
-                     "bowling_strike_rate", "dot_pct", "boundary_pct", "run_rate"},
+                     "bowling_strike_rate", "dot_pct", "boundary_pct", "run_rate", "dots", "boundaries"},
 }
 SIDE_METRICS["league"] = SIDE_METRICS["batting_team"] | {"economy"}
 # Plain words a planner may use for the bowler's version of a batting metric.
@@ -125,7 +133,27 @@ SPLITS = {
     "opposition": None,                                   # filled per side
     "result": None,
     "toss": None,
+    "bowl_kind": "coalesce(nullif(bs.bowl_kind, ''), 'unknown')",
+    "bat_hand": "coalesce(nullif(hs.bat_hand, ''), 'unknown')",
 }
+SPLIT_LABELS = {"bowl_kind": "bowling type", "bat_hand": "batting hand"}
+# The ranking unit: a career (default), a season ("most ducks in a season") or a match ("which match had the most runs").
+UNITS = {"career": "''", "season": "CAST(x.year AS VARCHAR)", "match": "CAST(x.match_id AS VARCHAR)"}
+
+# Home ground of a team in a season: the ground it played most at (4+ matches, 25%+ of all its games, about half its home games). Seasons played
+# at neutral venues have none (2009 South Africa, 2020 UAE, 2021 bubble, 2022 Mumbai/Pune). A match is home for a
+# team at its home ground, away at the opponent's, and neutral anywhere else (left out of both).
+HOME_VIEW = """
+CREATE OR REPLACE TEMP VIEW home_ground AS
+WITH t AS (SELECT year(start_date) AS y, franchise(team1) AS team, ground(venue) AS g FROM matches
+           UNION ALL SELECT year(start_date), franchise(team2), ground(venue) FROM matches),
+     c AS (SELECT y, team, g, count(*) AS n, sum(count(*)) OVER (PARTITION BY y, team) AS tot,
+                  row_number() OVER (PARTITION BY y, team ORDER BY count(*) DESC, g) AS rk
+           FROM t GROUP BY y, team, g)
+SELECT y, team, g FROM c WHERE rk = 1 AND n >= 4 AND n >= 0.25 * tot AND y NOT IN (2009, 2020, 2021, 2022);
+"""
+HOME_NOTE = ("Home = the ground a team played most at that season (4+ matches); 2009, 2020, 2021 and 2022 were at "
+             "neutral venues and are left out, as are matches at a team's second ground.")
 
 
 def _side_cols(subject: str) -> tuple[str, str, str]:
@@ -184,6 +212,15 @@ def describe(a: argparse.Namespace, names: dict[str, str]) -> list[str]:
         bits.append(f"{lo}-{hi} wickets in hand" if lo != hi else f"{lo} wickets in hand")
     if (bb := _range(a.batter_balls)):
         bits.append(f"batter's balls {bb[0]}-{bb[1]} of his innings")
+    if a.bowl_kind:
+        bits.append({"spin": "spinners", "pace": "pace bowlers"}[a.bowl_kind] if a.subject in ("bowler", "bowling_team")
+                    else f"against {a.bowl_kind}")
+    if a.bat_hand:
+        bits.append(f"{a.bat_hand}-handed batters" if a.subject == "batter" else f"to {a.bat_hand}-handed batters")
+    if a.venue_type:
+        bits.append({"home": "at home", "away": "away from home"}[a.venue_type])
+    if a.per and a.per != "career":
+        bits.append({"season": "best single seasons", "match": "single matches"}[a.per])
     return bits
 
 
@@ -217,7 +254,7 @@ def slice_stats(q: Any, a: argparse.Namespace) -> None:
         ctx.append(f"franchise(mm.winner) {'=' if a.result == 'won' else '<>'} {team_col}"
                    + (" AND mm.winner <> ''" if a.result == "lost" else ""))
     joins_info = bool(a.toss) or a.split == "toss"
-    if a.toss and not q.has("cs_match_info"):
+    if a.toss and not q.filled("cs_match_info"):
         q.note("Toss data is not loaded in this archive yet: re-run `python -m backend.db.cricsheet_load`.")
         return
     if a.toss:
@@ -250,6 +287,18 @@ def slice_stats(q: Any, a: argparse.Namespace) -> None:
     if a.batter_balls:
         lo, hi = _range(a.batter_balls)
         ctx.append(f"x.bat_ball_no BETWEEN {lo} AND {hi}")
+
+    styles = bool(a.bowl_kind or a.bat_hand) or a.split in ("bowl_kind", "bat_hand")
+    if styles and not q.filled("player_styles"):
+        q.note("Batting hand and bowling type are not loaded in this archive yet: run `python -m backend.db.player_styles --fetch 200`.")
+        return
+    if a.bowl_kind:
+        ctx.append(f"bs.bowl_kind = '{a.bowl_kind}'")
+    if a.bat_hand:
+        ctx.append(f"hs.bat_hand = '{a.bat_hand}'")
+    if a.venue_type:
+        h = "hg" if a.venue_type == "home" else "ag"
+        ctx.append(f"ground(x.venue) = {h}.g")
 
     sel, sel_out = [], []                                 # sel_out: the same, for a batter's dismissals
     if a.player:
@@ -296,25 +345,35 @@ def slice_stats(q: Any, a: argparse.Namespace) -> None:
             "F4": "CASE WHEN is_four THEN 1 ELSE 0 END", "S6": "CASE WHEN is_six THEN 1 ELSE 0 END"}
     select_cols = ", ".join(f"({v}) AS {k}" for k, v in cols.items())
     from_sql = (f"FROM {base} x JOIN matches mm USING (match_id)"
-                + (" LEFT JOIN cs_match_info ci USING (match_id)" if joins_info else ""))
+                + (" LEFT JOIN cs_match_info ci USING (match_id)" if joins_info else "")
+                + (" LEFT JOIN player_styles bs ON bs.player_id = x.bowler_id"
+                   " LEFT JOIN player_styles hs ON hs.player_id = x.batter_id" if styles else "")
+                + (f" JOIN home_ground {'hg' if a.venue_type == 'home' else 'ag'} ON "
+                   f"{'hg' if a.venue_type == 'home' else 'ag'}.y = x.year AND "
+                   f"{'hg' if a.venue_type == 'home' else 'ag'}.team = {team_col if a.venue_type == 'home' else other_col}"
+                   if a.venue_type else ""))
     sel_sql = " AND ".join(sel) or "TRUE"
     sel_out_sql = " AND ".join(sel_out) or "TRUE"
+    unit = a.per or "career"
     filtered = f"""f AS (SELECT x.match_id, x.inning, x.year, x.is_wicket, x.player_out_id, x.player_out,
-                              {key} AS k, {name_sql} AS name, {split_sql} AS s, {select_cols},
+                              {key} AS k, {name_sql} AS name, {split_sql} AS s, {UNITS[unit]} AS u, {select_cols},
                               ({sel_sql}) AS sel, ({sel_out_sql}) AS sel_out
                        {from_sql} WHERE {' AND '.join(ctx)})"""
     if metric == "high_score":
         _innings_list(q, a, filtered, params, subject, describe(a, names), names)
         return
+    if metric in INNINGS_COUNTS:
+        _innings_counts(q, a, filtered, params, metric, describe(a, names), names)
+        return
     rows = q.rows(f"""WITH {filtered}
-        SELECT k, s, any_value(name) AS name, sum(R) AS R, sum(B) AS B, sum(W) AS W, sum(DOT) AS DOT,
+        SELECT k, s, u, any_value(name) AS name, sum(R) AS R, sum(B) AS B, sum(W) AS W, sum(DOT) AS DOT,
                sum(BND) AS BND, sum(F4) AS F4, sum(S6) AS S6, count(DISTINCT (match_id, inning)) AS inns
-        FROM f WHERE sel GROUP BY k, s""", **params)
+        FROM f WHERE sel GROUP BY k, s, u""", **params)
     if subject == "batter":                               # dismissals belong to the player out (non-striker run-outs too)
-        outs = {(r["k"], r["s"]): r["n"] for r in q.rows(f"""WITH {filtered}
-            SELECT player_out_id AS k, s, count(*) AS n FROM f WHERE is_wicket AND sel_out GROUP BY 1, 2""", **params)}
+        outs = {(r["k"], r["s"], r["u"]): r["n"] for r in q.rows(f"""WITH {filtered}
+            SELECT player_out_id AS k, s, u, count(*) AS n FROM f WHERE is_wicket AND sel_out GROUP BY 1, 2, 3""", **params)}
         for r in rows:
-            r["W"] = outs.get((r["k"], r["s"]), 0)
+            r["W"] = outs.get((r["k"], r["s"], r["u"]), 0)
 
     # ---- baselines from the context only: per season (adjust) and per ball variance (shrink)
     base_rows = q.rows(f"""WITH {filtered} SELECT year, sum({num}) AS num, sum({den or num}) AS den,
@@ -336,12 +395,12 @@ def slice_stats(q: Any, a: argparse.Namespace) -> None:
     notes = []
     if den and a.adjust and len(league) > 0:
         # Expected numerator if this player had the league rate of each season he played in.
-        per = q.rows(f"""WITH {filtered} SELECT k, s, year, sum({den}) AS den FROM f WHERE sel GROUP BY 1, 2, 3""", **params)
+        per = q.rows(f"""WITH {filtered} SELECT k, s, u, year, sum({den}) AS den FROM f WHERE sel GROUP BY 1, 2, 3, 4""", **params)
         exp: dict[tuple, float] = {}
         for r in per:
-            exp[(r["k"], r["s"])] = exp.get((r["k"], r["s"]), 0) + (r["den"] or 0) * league.get(r["year"], 0)
+            exp[(r["k"], r["s"], r["u"])] = exp.get((r["k"], r["s"], r["u"]), 0) + (r["den"] or 0) * league.get(r["year"], 0)
         for r in out:
-            e = exp.get((r["k"], r["s"]))
+            e = exp.get((r["k"], r["s"], r["u"]))
             r["index"] = round(100 * (r[num] or 0) / e) if e else None
         notes.append(f"Season-adjusted index: 100 = the league's {label} on the same kind of balls in the same "
                      f"season{'s' if len(league) > 1 else ''}; above 100 is better than the league"
@@ -383,11 +442,22 @@ def slice_stats(q: Any, a: argparse.Namespace) -> None:
     noun = {"batter": "Batters", "bowler": "Bowlers", "batting_team": "Teams batting", "bowling_team": "Teams bowling",
             "league": "All IPL"}[subject]
     title = (f"{focus}{label}" if focus else f"IPL {label}" if subject == "league" else f"{noun} by {label}") \
-        + (f" by {split}" if split else "") + (" - " + ", ".join(bits) if bits else "") + f" {q.span}{sample_txt}"
+        + (f" by {SPLIT_LABELS.get(split, split)}" if split else "") + (" - " + ", ".join(bits) if bits else "") + f" {q.span}{sample_txt}"
     fmt = lambda v: round(v, 2) if isinstance(v, float) else v      # noqa: E731
+    shown = out[: a.limit]
+    matches = {}
+    if unit == "match" and shown:
+        matches = {str(m["match_id"]): m for m in q.rows(f"""SELECT match_id, start_date AS date, title,
+            franchise(team1) || ' v ' || franchise(team2) AS teams, status_text AS result FROM matches
+            WHERE match_id IN ({', '.join(str(int(r['u'])) for r in shown)})""")}
     records = []
-    for r in out[: a.limit]:
-        rec: dict[str, Any] = {who: r["name"]}
+    for r in shown:
+        rec: dict[str, Any] = {who: r["name"]} if not (unit == "match" and subject == "league") else {}
+        if unit == "season":
+            rec["season"] = r["u"]
+        if unit == "match":
+            m = matches.get(str(r["u"]), {})
+            rec.update(match=f"{m.get('teams', '')}, {m.get('title', '')}".strip(", "), date=q._plain(m.get("date")))
         if split:
             rec[split] = r["s"]
         rec[label] = fmt(r["value"])
@@ -412,6 +482,16 @@ def slice_stats(q: Any, a: argparse.Namespace) -> None:
         q.note(n)
     if chase:
         q.note("Rain-revised (D/L) matches are left out: their targets and overs are not like-for-like.")
+    if a.venue_type:
+        q.note(HOME_NOTE)
+    if styles:
+        by_bowler = bool(a.bowl_kind) or a.split == "bowl_kind"
+        pct = q.rows(f"""SELECT round(100.0 * count(s.player_id) / nullif(count(*), 0), 1) AS pct FROM d x
+                         LEFT JOIN player_styles s ON s.player_id = x.{'bowler_id' if by_bowler else 'batter_id'}
+                              AND s.{'bowl_kind' if by_bowler else 'bat_hand'} <> ''
+                         WHERE x.year BETWEEN $y0 AND $y1""")[0]["pct"]
+        q.note(f"{'Bowling type' if by_bowler else 'Batting hand'} (from ESPN player profiles) is known for {pct}% of these "
+               "seasons' balls; the rest are left out.")
 
 
 def _innings_list(q: Any, a: argparse.Namespace, filtered: str, params: dict[str, Any], subject: str,
@@ -444,6 +524,51 @@ def _innings_list(q: Any, a: argparse.Namespace, filtered: str, params: dict[str
         q.note("* = not out.")
 
 
+def _innings_counts(q: Any, a: argparse.Namespace, filtered: str, params: dict[str, Any], metric: str,
+                    bits: list[str], names: dict[str, str]) -> None:
+    """Ducks, fifties, hundreds: count a batter's innings in the slice (per career or per season)."""
+    unit = a.per or "career"
+    rows = q.rows(f"""WITH {filtered},
+        inn AS (SELECT k, u, match_id, inning, any_value(name) AS name, sum(R) AS runs FROM f WHERE sel GROUP BY k, u, match_id, inning),
+        outs AS (SELECT DISTINCT match_id, inning, player_out_id FROM f WHERE is_wicket),
+        x AS (SELECT inn.*, o.player_out_id IS NOT NULL AS is_out FROM inn
+              LEFT JOIN outs o ON o.match_id = inn.match_id AND o.inning = inn.inning AND o.player_out_id = inn.k)
+        SELECT any_value(name) AS name, u, count(*) FILTER (WHERE {INNINGS_COUNTS[metric]}) AS n, count(*) AS innings,
+               sum(runs) AS runs
+        FROM x GROUP BY k, u HAVING n > 0 ORDER BY n DESC, innings, name LIMIT $limit""", **params)
+    label = METRICS[metric][4]
+    title = (f"{names['players']}: {label}" if names.get("players") else f"Batters by {label}") \
+        + (" - " + ", ".join(bits) if bits else "") + f" {q.span}"
+    if not rows:
+        q.note(f"{title}: none.")
+        return
+    q.show(title, [{"batter": r["name"], **({"season": r["u"]} if unit == "season" else {}), label: r["n"],
+                    "innings": r["innings"], "runs": r["runs"]} for r in rows])
+    if metric == "ducks":
+        q.note("A duck is an innings of 0 that ended in a dismissal.")
+
+
+def home_record(q: Any, a: argparse.Namespace) -> None:
+    """Each team's record at home and away (see HOME_NOTE for what counts as home)."""
+    order = "home_win_pct ASC" if a.order == "worst" else "home_win_pct DESC"
+    q.table(f"Home and away records {q.span} (matches with a result; rain-revised kept)", f"""
+        WITH m AS (SELECT match_id, year(start_date) AS y, franchise(team1) AS t1, franchise(team2) AS t2,
+                          franchise(winner) AS w, ground(venue) AS g FROM matches
+                   WHERE year(start_date) BETWEEN $y0 AND $y1 AND winner <> ''),
+             side AS (SELECT m.*, t1 AS team, t2 AS opp FROM m UNION ALL SELECT m.*, t2, t1 FROM m),
+             tagged AS (SELECT s.team, s.w,
+                               CASE WHEN h.g = s.g THEN 'home' WHEN o.g = s.g THEN 'away' ELSE 'neutral' END AS place
+                        FROM side s LEFT JOIN home_ground h ON h.y = s.y AND h.team = s.team
+                        LEFT JOIN home_ground o ON o.y = s.y AND o.team = s.opp)
+        SELECT team, count(*) FILTER (WHERE place = 'home') AS home_played,
+               count(*) FILTER (WHERE place = 'home' AND w = team) AS home_won,
+               round(100.0 * count(*) FILTER (WHERE place = 'home' AND w = team) / nullif(count(*) FILTER (WHERE place = 'home'), 0), 1) AS home_win_pct,
+               count(*) FILTER (WHERE place = 'away') AS away_played,
+               round(100.0 * count(*) FILTER (WHERE place = 'away' AND w = team) / nullif(count(*) FILTER (WHERE place = 'away'), 0), 1) AS away_win_pct
+        FROM tagged GROUP BY team HAVING home_played >= {a.min_matches} ORDER BY {order} LIMIT $limit""")
+    q.note(HOME_NOTE)
+
+
 # ----------------------------------------------------------------- families
 
 def hattricks(q: Any, a: argparse.Namespace) -> None:
@@ -474,7 +599,7 @@ def hattricks(q: Any, a: argparse.Namespace) -> None:
 
 
 def toss(q: Any, a: argparse.Namespace) -> None:
-    if not q.has("cs_match_info"):
+    if not q.filled("cs_match_info"):
         q.note("Toss data is not loaded in this archive yet: re-run `python -m backend.db.cricsheet_load`.")
         return
     group = {"season": "CAST(year(m.start_date) AS VARCHAR)", "venue": "ground(m.venue)",
@@ -497,7 +622,7 @@ def toss(q: Any, a: argparse.Namespace) -> None:
 
 
 def awards(q: Any, a: argparse.Namespace) -> None:
-    if not q.has("cs_awards"):
+    if not q.filled("cs_awards"):
         q.note("Player-of-the-match data is not loaded yet: re-run `python -m backend.db.cricsheet_load`.")
         return
     team = ""
@@ -522,7 +647,7 @@ def awards(q: Any, a: argparse.Namespace) -> None:
 
 
 def impact(q: Any, a: argparse.Namespace) -> None:
-    if not q.has("cs_subs"):
+    if not q.filled("cs_subs"):
         q.note("Substitution data is not loaded yet: re-run `python -m backend.db.cricsheet_load`.")
         return
     team = f"AND franchise(s.team) = '{q.team(a.team)}'" if a.team else ""
@@ -574,6 +699,117 @@ def partnerships(q: Any, a: argparse.Namespace) -> None:
             ORDER BY p.runs DESC, date LIMIT $limit""")
 
 
+# ----------------------------------------------------------------- pitch profile
+
+# Phrases (not single words: "turned it to fine leg" is a stroke, not turn off the pitch) that describe the surface.
+PITCH_CUES = [
+    ("turn", r"(?<!bat )\b(?:turn(?:ed|ing|s)? (?:away|back|sharply|square|a long way)(?! for\b| to (?:deep|fine|square|short|long|mid|the))|turn(?:ed|s)? in sharply|big turn|sharp turn"
+             r"|plenty of turn|some turn|spun (?:away|in|back|sharply)|(?:grip(?:ped|ping|s)?) (?:and|off|on|the surface)"
+             r"|ripp(?:ed|ing) (?:it|past|through)|dusty)\b"),
+    ("seam or swing", r"\b(?:seam(?:ed|ing)? (?:away|in|back)|off the seam|nip(?:ped|s|ping)? (?:back|away|in)"
+                      r"|swing(?:s|ing)? (?:away|in|back)|(?<!been )swung (?:in|away|back)(?! over\b| to\b| for\b)|late movement|lateral movement|some movement)\b"),
+    ("bounce", r"\b(?:steep bounce|extra bounce|kick(?:ed|s)? up|short and climbing|climbs? (?:on|at|towards) (?:him|the)"
+               r"|bounced (?:more|steeply)|spongy bounce)\b"),
+    ("low bounce", r"\b(?:kept low|stayed low|keeping low|staying low|skidded|skid(?:s|ding)? on|uneven bounce|variable bounce)\b"),
+    ("slow, two-paced", r"\b(?:slow (?:pitch|surface|wicket|track|deck)|two[- ]paced|stopp(?:ed|ing) on|held up|holding up"
+                        r"|sticky|didn't come on|not coming on)\b"),
+    ("flat, good to bat", r"\b(?:flat (?:pitch|track|deck|surface)|belter of a (?:pitch|track|surface|deck)|batting paradise"
+                          r"|good (?:pitch|surface|track) to bat|true (?:pitch|surface|bounce))\b"),
+    ("dew", r"\b(?:dew|wet ball)\b"),
+]
+
+
+def pitch(q: Any, a: argparse.Namespace) -> None:
+    """How one match's pitch played, against the league in the same season: pace v spin, phase scoring, how
+    wickets fell, and what the commentary said. Outcomes, not a pitch reading: they mix the surface with the
+    bowlers, the batters and the match situation."""
+    q.params["mid"] = a.match_id
+    info = q.rows("""SELECT m.title, m.start_date, ground(m.venue) AS ground, franchise(m.team1) AS t1, franchise(m.team2) AS t2,
+                            m.status_text, year(m.start_date) AS y FROM matches m WHERE m.match_id = $mid""")
+    if not info:
+        q.note(f"No match {a.match_id} in the archive.")
+        return
+    m = info[0]
+    q.params["py"] = m["y"]
+    head = f"{m['t1']} v {m['t2']}, {m['title']}, {m['ground']}, {q._plain(m['start_date'])}"
+    phase = q.rows("""
+        WITH x AS (SELECT phase, match_id = $mid AS here, sum(runs_total) AS r, count(*) FILTER (WHERE is_legal) AS b
+                   FROM d WHERE year = $py GROUP BY 1, 2)
+        SELECT phase, round(6.0 * sum(r) FILTER (WHERE here) / nullif(sum(b) FILTER (WHERE here), 0), 2) AS rr_here,
+               round(6.0 * sum(r) / nullif(sum(b), 0), 2) AS rr_league
+        FROM x GROUP BY phase ORDER BY CASE phase WHEN 'powerplay' THEN 1 WHEN 'middle' THEN 2 ELSE 3 END""")
+    q.show(f"Pitch profile: {head} - run rate by phase against IPL {m['y']}", phase)
+    kinds: list[dict[str, Any]] = []
+    if q.filled("player_styles"):
+        kinds = q.rows("""
+            WITH x AS (SELECT s.bowl_kind AS kind, match_id = $mid AS here, sum(bowler_runs) AS r,
+                              count(*) FILTER (WHERE is_legal) AS b, count(*) FILTER (WHERE bowler_wicket) AS w,
+                              count(*) FILTER (WHERE is_legal AND bowler_runs = 0) AS dots
+                       FROM d JOIN player_styles s ON s.player_id = d.bowler_id AND s.bowl_kind <> ''
+                       WHERE year = $py GROUP BY 1, 2)
+            SELECT kind, sum(b) FILTER (WHERE here) AS balls, sum(w) FILTER (WHERE here) AS wickets,
+                   round(6.0 * sum(r) FILTER (WHERE here) / nullif(sum(b) FILTER (WHERE here), 0), 2) AS econ_here,
+                   round(6.0 * sum(r) / nullif(sum(b), 0), 2) AS econ_league,
+                   round(100.0 * sum(dots) FILTER (WHERE here) / nullif(sum(b) FILTER (WHERE here), 0), 1) AS dot_pct_here,
+                   round(100.0 * sum(dots) / nullif(sum(b), 0), 1) AS dot_pct_league
+            FROM x GROUP BY kind ORDER BY kind""")
+        q.show(f"Pace and spin against IPL {m['y']}", kinds)
+    outs = q.rows("""
+        SELECT round(100.0 * count(*) FILTER (WHERE match_id = $mid AND dismissal_type IN ('bowled', 'lbw'))
+                     / nullif(count(*) FILTER (WHERE match_id = $mid), 0), 1) AS bowled_lbw_pct_here,
+               round(100.0 * count(*) FILTER (WHERE dismissal_type IN ('bowled', 'lbw')) / nullif(count(*), 0), 1)
+                   AS bowled_lbw_pct_league,
+               count(*) FILTER (WHERE match_id = $mid) AS wickets_here
+        FROM d WHERE year = $py AND bowler_wicket""")
+    q.show("How wickets fell: bowled or lbw (a sign of low or skiddy bounce)", outs)
+    texts = [r["c"] for r in q.rows("SELECT commentary AS c FROM balls WHERE match_id = $mid AND commentary <> ''")] \
+        if q.has("balls") else []
+    cues = []
+    for label, pattern in PITCH_CUES:
+        hits = [t for t in texts if re.search(pattern, t, re.I)]
+        if hits:
+            example = re.sub(r"<[^>]{0,40}>", "", hits[0])
+            cues.append({"cue": label, "mentions": len(hits), "example": (example[:140] + "…") if len(example) > 140 else example})
+    if cues:
+        q.show(f"What the commentary said ({len(texts)} balls with commentary)", sorted(cues, key=lambda c: -c["mentions"]))
+    q.note(_pitch_verdict(phase, kinds, outs[0] if outs else {}, cues, len(texts)))
+
+
+def _pitch_verdict(phase: list[dict[str, Any]], kinds: list[dict[str, Any]], outs: dict[str, Any],
+                   cues: list[dict[str, Any]], commentary: int) -> str:
+    """One sentence from the numbers: each part says what it compares, so the verdict can be checked."""
+    parts = []
+    here = [p for p in phase if p["rr_here"] is not None]
+    if here:
+        diff = sum(p["rr_here"] - p["rr_league"] for p in here) / len(here)
+        parts.append("high-scoring" if diff > 1 else "low-scoring" if diff < -1 else "about par for scoring")
+    by = {k["kind"]: k for k in kinds if k["econ_here"] is not None and k["balls"] and k["balls"] >= 24}
+    if "spin" in by and "pace" in by:
+        edge = (by["spin"]["econ_here"] - by["spin"]["econ_league"]) - (by["pace"]["econ_here"] - by["pace"]["econ_league"])
+        parts.append("spin did better than usual relative to pace" if edge < -1 else
+                     "pace did better than usual relative to spin" if edge > 1 else "pace and spin fared about as usual")
+    if outs.get("wickets_here") and outs.get("bowled_lbw_pct_here") is not None and outs["wickets_here"] >= 6 \
+            and outs["bowled_lbw_pct_here"] - (outs.get("bowled_lbw_pct_league") or 0) > 15:
+        parts.append("an unusual share of bowled and lbw dismissals")
+    top = [c for c in cues if c["mentions"] >= 2][:2]
+    if top:
+        parts.append("commentary often mentioned " + " and ".join(c["cue"] for c in top))
+    elif commentary == 0:
+        parts.append("no ball-by-ball commentary to add")
+    return ("Verdict: " + "; ".join(parts) + ". Each part compares this match with the league in the same season; "
+            "it describes outcomes, which mix the surface with the bowlers, batters and match situation.") if parts else \
+        "Not enough ball data to profile this pitch."
+
+
+def par(q: Any, a: argparse.Namespace) -> None:
+    """The league's par for each over number in a season: average runs and wickets per innings (the baseline for the
+    over-by-over chart; death overs always score more, so comparing an over with the innings' own average misleads)."""
+    q.table(f"Par by over {q.span}", """
+        SELECT over_number AS over, round(sum(runs_total) * 1.0 / count(DISTINCT (match_id, inning)), 2) AS runs,
+               round(count(*) FILTER (WHERE is_wicket) * 1.0 / count(DISTINCT (match_id, inning)), 3) AS wickets
+        FROM d WHERE year BETWEEN $y0 AND $y1 GROUP BY 1 ORDER BY 1""")
+
+
 def register(cmd: Any) -> None:
     """Add the commands to queries.build_parser."""
     p = cmd("slice", slice_stats, "Any metric over any slice of balls (see backend/db/analytics.py)", limit=10)
@@ -597,10 +833,20 @@ def register(cmd: Any) -> None:
     p.add_argument("--wickets-in-hand", help="e.g. 0-3 (before the ball)")
     p.add_argument("--batter-balls", help="the batter's nth balls of his innings, e.g. 1-10")
     p.add_argument("--split", choices=sorted(SPLITS), help="one row per value: compare chasing vs batting first, ...")
+    p.add_argument("--per", choices=sorted(UNITS), help="rank careers (default), single seasons or single matches")
+    p.add_argument("--bowl-kind", choices=["pace", "spin"], help="the bowler's type (spinners; or a batter against spin)")
+    p.add_argument("--bat-hand", choices=["left", "right"], help="the batter's hand (left-handers; or a bowler to them)")
+    p.add_argument("--venue-type", choices=["home", "away"], help="the subject's side at home or away (see HOME_NOTE)")
     p.add_argument("--adjust", action="store_true", help="season-adjusted index (100 = league that season)")
     p.add_argument("--shrink", action="store_true", help="empirical-Bayes shrinkage toward the league rate")
     p.add_argument("--order", choices=["best", "worst"], default="best")
     p.add_argument("--min-balls", type=int, help="minimum sample (balls; dismissals for averages)")
+    cmd("par", par, "League par for each over number (runs and wickets per innings)", limit=20)
+    p = cmd("pitch", pitch, "How one match's pitch played against the league that season", year=False)
+    p.add_argument("match_id", type=int)
+    p = cmd("home", home_record, "Each team's home and away record", limit=20)
+    p.add_argument("--order", choices=["best", "worst"], default="best")
+    p.add_argument("--min-matches", type=int, default=10)
     p = cmd("hattricks", hattricks, "Every hat-trick (three wickets on consecutive deliveries)", limit=40)
     p.add_argument("--team")
     p = cmd("toss", toss, "Toss decisions and whether the toss winner won", limit=25)

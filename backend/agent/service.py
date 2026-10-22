@@ -456,6 +456,7 @@ class CricbotAgent:
         ) and self._names_are_grounded(candidate, state["compact_results"], state["query"]) \
             and stats.mentions_tie(candidate, state.get("stats_results") or []) \
             and stats.crowns_top(candidate, state.get("stats_results") or []) \
+            and stats.claims_hold(candidate, state.get("stats_results") or []) \
             and not self._is_non_answer(candidate, state) \
             and self._result_is_consistent(candidate, state.get("cards") or [])
         reply = self._limit_sentences(candidate) if grounded else self._grounded_fallback(state)

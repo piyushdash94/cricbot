@@ -13,6 +13,18 @@ from backend.src.ipl_data import get_match_detail
 from backend.src.momentum_shifts import describe
 
 
+
+_TAG = re.compile(r"<[^>]{0,40}>")
+_ENTITIES = {"&amp;": "&", "&quot;": '"', "&#39;": "'", "&lt;": "<", "&gt;": ">", "&nbsp;": " "}
+
+
+def plain_text(text: str) -> str:
+    """Commentary without markup: ESPN wraps emphasis in <strong>/<b>/<i>, which the LLM does not need."""
+    text = _TAG.sub("", text or "")
+    for entity, char in _ENTITIES.items():
+        text = text.replace(entity, char)
+    return re.sub(r"\s+", " ", text).strip()
+
 def resolve_match(entities: dict[str, Any], results: list[dict[str, Any]], ui_context: dict[str, Any]) -> dict[str, str] | None:
     """Pick the single match a question is about, or None for list/unclear questions."""
     if entities.get("intent") == "list_matches":
@@ -62,6 +74,30 @@ def _key_moments(balls: list[dict[str, Any]], limit: int = 8) -> list[dict[str, 
     return sorted(picked, key=lambda ball: (ball["inning"], int(ball.get("over") or 0), ball.get("id", "")))
 
 
+PITCH_WORDS = re.compile(r"\b(pitch|surface|wicket (?:played|behaved)|conditions|turn(?:ing)?|spin(?:ners?)?|seam|swing|bounce|dew|"
+                         r"slow|two[- ]paced|flat|track|deck)\b", re.I)
+
+
+def pitch_lines(match_slug: str) -> list[str]:
+    """The archive's pitch profile for one match, compacted for the facts sheet (a few lines, not tables)."""
+    found = re.search(r"(\d+)$", match_slug or "")
+    if not found:
+        return []
+    try:
+        from backend.db import queries
+        blocks = queries.run(["pitch", found.group(1)])
+    except Exception:
+        return []
+    out = ["Pitch profile (this match against the league that season):"]
+    for block in blocks:
+        if block["type"] == "text":
+            out.append("  " + block["text"])
+            continue
+        for row in block["rows"][:7]:
+            out.append("  " + ", ".join(f"{c}={v}" for c, v in zip(block["columns"], row) if v not in (None, "")))
+    return out if len(out) > 1 else []
+
+
 def build_match_context(target: dict[str, str], question: str) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
     """Return (facts text, chat card, result row) for one match."""
     try:
@@ -98,7 +134,7 @@ def build_match_context(target: dict[str, str], question: str) -> tuple[str, dic
     if moments:
         lines.append("Key deliveries:")
         for ball in moments:
-            text = ball.get("commentary") or ball.get("text") or ""
+            text = plain_text(ball.get("commentary") or ball.get("text") or "")
             lines.append(f"  Inns {ball['inning']} {ball['label']} {ball.get('title', '')}: {ball['event']} – {text} (score {ball.get('score') or 'n/a'})")
     balls = detail.get("balls") or []
     requested = [(None, over) for over in _over_requests(question)]
@@ -112,7 +148,7 @@ def build_match_context(target: dict[str, str], question: str) -> tuple[str, dic
         if deliveries:
             lines.append(f"Over {over}{f' of innings {inning_number}' if inning_number else ''} deliveries:")
             for ball in deliveries:
-                lines.append(f"  Inns {ball['inning']} {ball['label']} {ball.get('title', '')}: {ball['event']} – {ball.get('commentary') or ball.get('text', '')} (score {ball.get('score') or 'n/a'})")
+                lines.append(f"  Inns {ball['inning']} {ball['label']} {ball.get('title', '')}: {ball['event']} – {plain_text(ball.get('commentary') or ball.get('text', ''))} (score {ball.get('score') or 'n/a'})")
     coverage = detail.get("ball_coverage", {})
     lines.append(f"Data: {coverage.get('label', 'unknown')} · {detail.get('consistency', {}).get('note', '')}")
 
@@ -137,7 +173,7 @@ def build_match_context(target: dict[str, str], question: str) -> tuple[str, dic
         ],
         "key_moments": [
             {"inning": ball["inning"], "label": ball["label"], "event": ball["event"], "title": ball.get("title", ""),
-             "text": ball.get("commentary") or ball.get("text", ""), "wicket": ball.get("wicket", False), "boundary": ball.get("boundary", False)}
+             "text": plain_text(ball.get("commentary") or ball.get("text", "")), "wicket": ball.get("wicket", False), "boundary": ball.get("boundary", False)}
             for ball in moments[:5]
         ],
         "momentum_shifts": [
@@ -154,6 +190,8 @@ def build_match_context(target: dict[str, str], question: str) -> tuple[str, dic
         "subtitle": match.get("status_text", ""), "meta": f"IPL {match['season']} · {match.get('venue', '')}",
         "action": {"type": "open_match", "series_slug": match["series_slug"], "match_slug": match["match_slug"]},
     }
+    if PITCH_WORDS.search(question or ""):
+        lines.extend(pitch_lines(target.get("match_slug", "")))
     return "\n".join(lines), card, row
 
 

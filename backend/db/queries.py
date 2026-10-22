@@ -443,9 +443,23 @@ def results(q: "Q", a: argparse.Namespace) -> None:
         q.note(f"Unknown kind {a.kind!r}.")
 
 
+MILESTONE_COUNTS = {"fifties": "CASE WHEN b.runs BETWEEN 50 AND 99 THEN 1 ELSE 0 END",
+                    "hundreds": "CASE WHEN b.runs >= 100 THEN 1 ELSE 0 END", "sixes": "b.sixes", "fours": "b.fours",
+                    "ducks": "CASE WHEN b.runs = 0 AND b.is_out THEN 1 ELSE 0 END"}
+
+
 def milestone(q: "Q", a: argparse.Namespace) -> None:
-    """Fewest innings (or balls) to reach N runs or wickets."""
+    """Fewest innings (or balls) to reach N runs or wickets, or N fifties, hundreds, sixes, fours or ducks."""
     q.params["v"] = a.value
+    if a.stat in MILESTONE_COUNTS:
+        q.table(f"Fewest innings to {a.value} IPL {a.stat}", f"""
+            WITH x AS (SELECT b.player, b.player_id, row_number() OVER w AS inns, sum({MILESTONE_COUNTS[a.stat]}) OVER w AS cum,
+                              m.start_date
+                       FROM bat_inn b JOIN matches m USING (match_id)
+                       WINDOW w AS (PARTITION BY b.player_id ORDER BY m.start_date, b.match_id, b.inning))
+            SELECT any_value(player) AS player, min(inns) AS innings, min(start_date) FILTER (WHERE cum >= $v) AS reached_on
+            FROM x WHERE cum >= $v GROUP BY player_id ORDER BY innings, reached_on LIMIT $limit""")
+        return
     if a.stat == "runs":
         q.table(f"Fewest innings to {a.value} IPL runs", """
             WITH x AS (SELECT b.player, b.player_id, row_number() OVER w AS inns, sum(b.runs) OVER w AS cum, m.start_date
@@ -695,6 +709,22 @@ def ground_report(q: "Q", a: argparse.Namespace) -> None:
                f"average in the same seasons ({t['league_1st']}); chasing sides won {t['chase_win_pct']:.0f}% of completed "
                f"chases. These are outcomes, not a pitch reading: they mix the surface with boundary size, dew and "
                f"the teams that played there." + (" Small sample: fewer than 10 matches." if n < 10 else ""))
+    if q.filled("player_styles"):                         # last, so the note above still finds the scoring table
+        q.table(f"{name}: pace and spin, against the league in the same seasons {q.span}", f"""
+            WITH {seasons},
+            x AS (SELECT ground(venue) = $g AS here, s.bowl_kind AS kind, bowler_runs, is_legal, bowler_wicket,
+                         is_legal AND bowler_runs = 0 AS dot
+                  FROM d JOIN player_styles s ON s.player_id = d.bowler_id AND s.bowl_kind <> ''
+                  WHERE year IN (SELECT year FROM years)),
+            agg AS (SELECT here, kind, count(*) FILTER (WHERE is_legal) AS balls, 6.0 * sum(bowler_runs) / count(*) FILTER (WHERE is_legal) AS econ,
+                           count(*) FILTER (WHERE is_legal) * 1.0 / nullif(count(*) FILTER (WHERE bowler_wicket), 0) AS sr,
+                           100.0 * count(*) FILTER (WHERE dot) / count(*) FILTER (WHERE is_legal) AS dots,
+                           100.0 * count(*) FILTER (WHERE is_legal) / sum(count(*) FILTER (WHERE is_legal)) OVER (PARTITION BY here) AS share
+                    FROM x GROUP BY GROUPING SETS ((here, kind), (kind)))
+            SELECT h.kind, round(h.share, 1) AS share_of_overs, round(h.econ, 2) AS econ, round(l.econ, 2) AS league_econ,
+                   round(h.sr, 1) AS balls_per_wkt, round(l.sr, 1) AS league_balls_per_wkt,
+                   round(h.dots, 1) AS dot_pct, round(l.dots, 1) AS league_dot_pct
+            FROM agg h JOIN agg l ON l.kind = h.kind AND l.here IS NULL WHERE h.here ORDER BY h.kind""")
 
 
 def champions(q: "Q", a: argparse.Namespace) -> None:
@@ -809,9 +839,9 @@ class Q:
             raise NoDatabase(f"No database at {path}. Run `python -m backend.db.cricsheet_load --sync` first, or pass --db.")
         self.con = store.connect(path, read_only=True)
         tables = {r[0] for r in self.con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
-        from .analytics import STATE_VIEWS
+        from .analytics import HOME_VIEW, STATE_VIEWS
         self.tables = tables
-        self.con.execute(FRANCHISE_MACRO + source_views(tables) + VIEWS + STATE_VIEWS)
+        self.con.execute(FRANCHISE_MACRO + source_views(tables) + VIEWS + STATE_VIEWS + HOME_VIEW)
         y0, y1 = parse_years(getattr(a, "year", None))
         self.span = "(all time)" if getattr(a, "year", None) is None else f"({a.year})"
         self.params: dict[str, Any] = {"y0": y0, "y1": y1, "limit": getattr(a, "limit", 15),
@@ -820,6 +850,10 @@ class Q:
 
     def has(self, table: str) -> bool:
         return table in self.tables
+
+    def filled(self, table: str) -> bool:
+        """The table exists and has rows (an older archive gets the table empty from the schema)."""
+        return table in self.tables and bool(self.con.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone())
 
     @staticmethod
     def team(code: str | None) -> str:
@@ -962,7 +996,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--value", type=int, default=0, help="the run or wicket threshold")
     p.add_argument("--over", type=int, help="for needed_at_over: the over (default 17, i.e. the last 4 overs)")
     p = cmd("milestone", milestone, "Fewest innings (or balls) to N runs or wickets", year=False, limit=10)
-    p.add_argument("stat", choices=["runs", "wickets"])
+    p.add_argument("stat", choices=["runs", "wickets", *MILESTONE_COUNTS])
     p.add_argument("value", type=int)
     p.add_argument("--by", choices=["innings", "balls"], default="innings")
     p = cmd("player-match", player_match, "A player's Nth IPL match and what they did in it", year=False)

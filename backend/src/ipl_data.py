@@ -432,9 +432,12 @@ def _demo_balls() -> list[dict[str, Any]]:
 def _analytics(scorecard: dict[str, Any]) -> dict[str, Any]:
     innings = scorecard.get("content", {}).get("innings", []) or []
     par = match_par(innings)
+    board = impact_leaderboard(innings, par) if par else []
+    # Best seven plus the three costliest (still sorted high to low), so the chart shows both sides.
+    impact = board[:7] + [row for row in board[7:][-3:] if row["impact"] < 0]
     return {
         "par": par,
-        "impact": impact_leaderboard(innings, par)[:10] if par else [],
+        "impact": impact,
         "turning_points": turning_points(innings, top_n=5),
         "momentum": [{"team": innings_team_name(row), "values": [round(value, 2) for value in momentum_series(row)]} for row in innings],
         "pitch": pitch_profile(innings),

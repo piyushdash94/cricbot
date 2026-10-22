@@ -1,9 +1,35 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { FormEvent, ReactNode } from "react";
 import { ClarifyChatCard, ScopeChatCard, StatsChatCard, StatsPanel } from "./stats";
 import type { StatsCard, ClarifyCard, ScopeCard } from "./stats";
+import { ImpactBars, OverChart, PitchCard, usePar, Worm } from "./match-charts";
+
+// ESPN commentary marks emphasis with <b>/<strong>/<i>/<em>. Render those as React elements and drop any other
+// tag: nothing is ever injected as HTML, so stray or hostile markup cannot run or show up as text.
+const ENTITIES: Record<string, string> = { "&amp;": "&", "&quot;": "\"", "&#39;": "'", "&lt;": "<", "&gt;": ">", "&nbsp;": " " };
+function RichText({ text }: { text: string }) {
+  const parts: ReactNode[] = [];
+  let bold = false;
+  let italic = false;
+  text.split(/(<\/?[a-zA-Z][^>]{0,40}>)/).forEach((chunk, index) => {
+    const tag = chunk.match(/^<(\/?)([a-zA-Z]+)/);
+    if (tag) {
+      const name = tag[2].toLowerCase();
+      if (name === "b" || name === "strong") bold = tag[1] !== "/";
+      else if (name === "i" || name === "em") italic = tag[1] !== "/";
+      else if (name === "br") parts.push(<br key={index} />);
+      return;
+    }
+    if (!chunk) return;
+    let node: ReactNode = chunk.replace(/&(amp|quot|#39|lt|gt|nbsp);/g, (entity) => ENTITIES[entity] ?? entity);
+    if (italic) node = <em>{node}</em>;
+    if (bold) node = <strong>{node}</strong>;
+    parts.push(<Fragment key={index}>{node}</Fragment>);
+  });
+  return <>{parts}</>;
+}
 
 // ---------------------------------------------------------------- contracts
 
@@ -635,9 +661,10 @@ function Overview({ detail, onTab }: { detail: MatchDetail; onTab: (tab: MatchTa
   return <div className="overview-grid">
     <article className="detail-card story-card"><div className="card-title"><div><p className="section-kicker">MATCH STORY</p><h3>How it was won</h3></div><span className="story-badge" title="Built only from scorecard, deliveries and commentary">Grounded recap</span></div>
       <ol className="story-lines">{lines.map((line) => <li key={line.kicker}><span>{line.kicker}</span><p>{line.text}</p></li>)}</ol>
-      {moments.length > 0 && <div className="key-moments"><p className="section-kicker">KEY MOMENTS</p>{moments.map((ball) => <div className={`moment${ball.wicket ? " wicket" : " boundary"}`} key={ball.id}><b>{inningsTag(detail, ball)} {ball.label}</b><em>{ball.event}</em><span><strong>{ball.title}</strong>{ball.commentary || ball.text}</span></div>)}<button className="wide-action" onClick={() => onTab("balls")}>Full delivery timeline →</button></div>}
+      {moments.length > 0 && <div className="key-moments"><p className="section-kicker">KEY MOMENTS</p>{moments.map((ball) => <div className={`moment${ball.wicket ? " wicket" : " boundary"}`} key={ball.id}><b>{inningsTag(detail, ball)} {ball.label}</b><em>{ball.event}</em><span><strong>{ball.title}</strong><RichText text={ball.commentary || ball.text} /></span></div>)}<button className="wide-action" onClick={() => onTab("balls")}>Full delivery timeline →</button></div>}
     </article>
     <article className="detail-card"><div className="card-title"><div><p className="section-kicker">MATCH NOTES</p><h3>Known facts</h3></div></div><dl className="facts"><div><dt>Toss</dt><dd>{formatToss(detail.toss)}</dd></div><div><dt>Player of the match</dt><dd>{detail.player_awards.join(", ") || "Unavailable"}</dd></div><div><dt>Deliveries</dt><dd>{detail.balls.length} ({detail.ball_coverage.label}){detail.commentary_count ? `, ${detail.commentary_count} with commentary` : ""}</dd></div></dl></article>
+    <PitchCard matchSlug={detail.match.match_slug} />
     <article className="detail-card"><div className="card-title"><div><p className="section-kicker">PROVENANCE</p><h3>Where this came from</h3></div>{detail.consistency && <span className={`consistency ${detail.consistency.status}`}>{detail.consistency.status}</span>}</div>
       {detail.sources.map((source) => <div className="source-row" key={source.name}><i className={source.available ? "on" : ""} /><span><strong>{source.name}</strong><small>{source.provider}</small></span></div>)}
       {detail.consistency && <p className="card-copy">{detail.consistency.note}{detail.consistency.checks.length > 0 && ` ${detail.consistency.checks.map((check) => `${check.team}: ${check.canonical} vs ${check.reference}`).join("; ")}.`}</p>}
@@ -690,7 +717,7 @@ function BallByBall({ detail, balls, filter, onFilter }: { detail: MatchDetail; 
       const runs = group.balls.reduce((sum, ball) => sum + ball.runs, 0);
       const end = group.balls.at(-1)?.score;
       return <section className="over-group" key={group.key}><header><strong>{filter === 0 && innings.length > 1 ? `${teamFor(group.inning) ?? `Inns ${group.inning}`} · ` : ""}Over {group.over + 1}</strong>{kind === "all" && <span>{plural(runs, "run")}{end ? ` · ${end}` : ""}</span>}</header>
-        {group.balls.map((ball) => <div className={`ball-row${ball.wicket ? " wicket" : ball.boundary ? " boundary" : /wd|nb/.test(ball.event) ? " extra" : ""}`} key={ball.id}><span>{ball.label}</span><b>{ball.event}</b><div><strong>{ball.title || `Delivery ${ball.label}`}</strong><p>{ball.text || "No description."}</p>{ball.commentary && <q>{ball.commentary}</q>}</div>{ball.score && <em>{ball.score}</em>}</div>)}
+        {group.balls.map((ball) => <div className={`ball-row${ball.wicket ? " wicket" : ball.boundary ? " boundary" : /wd|nb/.test(ball.event) ? " extra" : ""}`} key={ball.id}><span>{ball.label}</span><b>{ball.event}</b><div><strong>{ball.title || `Delivery ${ball.label}`}</strong><p>{ball.text ? <RichText text={ball.text} /> : "No description."}</p>{ball.commentary && <q><RichText text={ball.commentary} /></q>}</div>{ball.score && <em>{ball.score}</em>}</div>)}
       </section>;
     }) : <div className="empty-state"><strong>{detail.balls.length ? "No deliveries match this filter" : "No delivery records for this match"}</strong><p>{detail.balls.length ? "Switch back to all balls or another innings." : "The scorecard is still available."}</p></div>}</div>
   </article>;
@@ -699,7 +726,9 @@ function BallByBall({ detail, balls, filter, onFilter }: { detail: MatchDetail; 
 function Momentum({ detail, onAsk }: { detail: MatchDetail; onAsk: (text: string) => void }) {
   const shifts = detail.analytics.shifts ?? [];
   const teams = playerTeams(detail.innings);
-  const peak = Math.max(1, ...detail.analytics.momentum.flatMap((series) => series.values.map(Math.abs)));
+  const par = usePar(detail.match.season);
+  const sides = detail.innings.slice(0, 2).map((inning) => ({ inning: inning.number, team: inning.team, runs: inning.runs,
+    wickets: inning.wickets, color: teamColor(detail, inning.team) }));
   return <div className="momentum-layout">
     <article className="detail-card"><div className="card-title"><div><p className="section-kicker">MOMENTUM SHIFTS</p><h3>Where the match moved</h3></div><button className="ask-button" onClick={() => onAsk("Where did this match turn, and why?")}>Ask Pandit to explain ↗</button></div>
       <p className="card-copy">Detected from every delivery: wicket clusters, scoring bursts, squeezes, chase-equation swings, and chances missed in commentary. Swing is measured in runs, with a wicket worth 8.</p>
@@ -709,11 +738,15 @@ function Momentum({ detail, onAsk }: { detail: MatchDetail; onAsk: (text: string
         <b><small>favours</small>{shift.favours}<small>{shift.magnitude} runs</small></b>
       </li>)}</ol> : <p className="card-copy">Momentum shifts need delivery-level data, which this match does not have.</p>}
     </article>
-    <article className="detail-card"><div className="card-title"><div><p className="section-kicker">PRESSURE CURVE</p><h3>Over-by-over momentum</h3></div></div>
-      {detail.analytics.momentum.map((series) => <div className="momentum-row" key={series.team}><strong>{series.team}</strong><div>{series.values.map((value, index) => <i key={index} className={value < 0 ? "down" : "up"} style={{ height: `${Math.max(3, (Math.abs(value) / peak) * 50)}%` }} title={`Over ${index + 1}: ${value > 0 ? "+" : ""}${value}`} />)}</div></div>)}
-      <p className="card-copy">Smoothed runs per over against the innings average, each wicket costing 8 runs. Above the line the batting side was on top.</p>
+    <article className="detail-card"><div className="card-title"><div><p className="section-kicker">OVER BY OVER</p><h3>Runs per over against par</h3></div></div>
+      <OverChart sides={sides} balls={detail.balls} par={par} season={detail.match.season} />
     </article>
-    <article className="detail-card"><div className="card-title"><div><p className="section-kicker">PLAYER IMPACT</p><h3>Runs above match par</h3></div></div><div className="impact-list">{detail.analytics.impact.slice(0, 8).map((player, index) => <div key={`${player.player}-${player.role}`}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{player.player}</strong><small>{[player.team || teams.get(player.player), roleLabel(player.role)].filter(Boolean).join(" · ")}</small></div><b>{player.impact > 0 ? "+" : ""}{player.impact.toFixed(1)}</b></div>)}</div></article>
+    <article className="detail-card"><div className="card-title"><div><p className="section-kicker">THE WORM</p><h3>Runs as the innings went</h3></div></div>
+      <Worm sides={sides} balls={detail.balls} par={par} />
+    </article>
+    <article className="detail-card"><div className="card-title"><div><p className="section-kicker">PLAYER IMPACT</p><h3>Runs above match par</h3></div></div>
+      <ImpactBars rows={detail.analytics.impact} teamOf={(player) => teams.get(player)} colorOf={(team) => teamColor(detail, team)} />
+    </article>
   </div>;
 }
 

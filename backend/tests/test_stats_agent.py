@@ -575,7 +575,7 @@ def test_milestones_take_every_value_and_years_ignore_run_counts():
 
 def test_gaps_are_named_instead_of_answering_a_nearby_question():
     assert stats.capability_gaps("who bowled the fastest ball for MI?", []) == ["ball speed"]
-    assert stats.capability_gaps("who is the best spinner for RCB?", [])[0].startswith("bowling type")
+    assert stats.capability_gaps("which player had the most impact points of all time?", [])[0].startswith("impact points")
     assert stats.capability_gaps("highest strike rate in overs 12-20", [{"name": "phase_leaders", "args": {}}]) \
         == ["these specific overs"]
     assert stats.capability_gaps("highest strike rate in overs 12-20", [{"name": "over_range_leaders", "args": {}}]) == []
@@ -825,3 +825,100 @@ def test_reply_must_crown_the_top_row_and_state_the_definition():
     definition = "Finisher = batting in overs 16-20 of chases that were won. Ranked by strike rate."
     assert not stats.states_definition("AB de Villiers is the best finisher.", definition)
     assert stats.states_definition("In overs 16-20 of won chases, AB de Villiers is the best.", definition)
+
+
+# ----------------------------------------------------------------- units, styles, home, pitch, claims
+
+def _styles(db):
+    con = __import__("duckdb").connect(db)
+    con.execute("INSERT INTO player_styles SELECT DISTINCT bowler_id, bowler, 'right', 'x', "
+                "CASE WHEN bowler IN ('M Theekshana', 'Wanindu Hasaranga', 'Adam Zampa', 'A Zampa', 'PWH de Silva') "
+                "THEN 'spin' ELSE 'pace' END, 'right', 'test' FROM cricsheet_balls")
+    con.execute("INSERT INTO player_styles SELECT DISTINCT batter_id, batter, CASE WHEN batter LIKE '%Kishan%' "
+                "THEN 'left' ELSE 'right' END, '', '', '', 'test' FROM cricsheet_balls "
+                "WHERE batter_id NOT IN (SELECT player_id FROM player_styles)")
+    con.close()
+
+
+def test_units_counts_and_styles_on_the_fixture(db):
+    per_match, title = table(["slice", "--subject", "league", "--metric", "runs", "--per", "match"], db)
+    assert per_match[0]["runs"] == 286 + 242 and "single matches" in title           # both innings of the one match
+    ducks = queries.run(["slice", "--subject", "batter", "--metric", "ducks", "--per", "season"], db=db)
+    assert ducks[0]["type"] == "table" and all(r[2] >= 1 for r in ducks[0]["rows"])
+    assert "not loaded" in queries.run(["slice", "--metric", "runs", "--bowl-kind", "spin"], db=db)[0]["text"]
+    _styles(db)
+    spin, title = table(["slice", "--subject", "bowler", "--metric", "economy", "--bowl-kind", "spin", "--min-balls", "1"], db)
+    assert "spinners" in title and {r["bowler"] for r in spin} <= {"M Theekshana", "Wanindu Hasaranga", "Adam Zampa", "A Zampa"}
+    split, title = table(["slice", "--metric", "runs", "--player", "Ishan Kishan", "--split", "bowl_kind"], db)
+    assert "by bowling type" in title and {r["bowl_kind"] for r in split} <= {"pace", "spin"}
+    lefties, _ = table(["slice", "--metric", "runs", "--bat-hand", "left", "--min-balls", "0"], db)
+    assert [r["batter"] for r in lefties] == ["Ishan Kishan"]
+    assert queries.run(["milestone", "hundreds", "1"], db=db)[0]["rows"][0][0] == "Ishan Kishan"
+
+
+def test_pitch_profile_on_the_fixture(db):
+    blocks = queries.run(["pitch", "1473439"], db=db)
+    # One match in the archive is the whole 2025 league, so it is "about par" by construction.
+    assert blocks[0]["title"].startswith("Pitch profile: SRH v RR") and blocks[-1]["text"].startswith("Verdict: about par")
+    assert "outcomes" in blocks[-1]["text"]                                    # it says what it is, and is not
+    assert queries.run(["pitch", "1"], db=db)[0]["text"].startswith("No match 1")
+
+
+def test_pitch_cues_are_phrases_not_strokes():
+    import re as _re
+    from backend.db.analytics import PITCH_CUES
+    cue = dict(PITCH_CUES)
+    assert _re.search(cue["turn"], "pitches outside leg and turns away like a legbreak")
+    assert not _re.search(cue["turn"], "full, on the pads, and turned away for one to deep backward square")
+    assert not _re.search(cue["turn"], "the bat turns in his hands")
+    assert _re.search(cue["seam or swing"], "length ball and swings away at the last moment")
+    assert not _re.search(cue["seam or swing"], "it has been swung away over midwicket")
+    assert not _re.search(cue["bounce"], "Rinku climbs into the drive")
+    assert not _re.search(cue["dew"], "Rana's towel fell off as he delivered the ball")
+
+
+@pytest.mark.parametrize("question, expected", [
+    ("who has scored the most ducks in an IPL season?", {"per": "season"}),
+    ("which Ipl knockout match had the most runs scored in total ?", {"per": "match", "stage": "playoff"}),
+    ("best economy against left-handers in the death overs", {"bat_hand": "left", "phase": "death"}),
+    ("most wickets by a pacer in the powerplay", {"bowl_kind": "pace", "phase": "powerplay"}),
+    ("Kohli's strike rate at home", {"venue_type": "home"}),
+])
+def test_parse_filters_reads_units_styles_and_home(question, expected):
+    assert expected.items() <= stats.slices.parse_filters(question).items()
+
+
+def test_rules_for_counts_comparisons_and_new_families():
+    plan = lambda q: stats.rule_plan(q, resolve_entities(q), None)                 # noqa: E731
+    assert plan("who has bowled the most dot balls in IPL all time?")[0]["args"]["metric"] == "dots"
+    assert plan("which team has the worst home winning percentage ?") == [{"name": "home_record", "args": {"order": "worst"}}]
+    assert plan("who was the fastest to score 10 fifties ?")[0]["args"] == {"stat": "fifties", "value": 10, "by": "innings"}
+    match = plan("which Ipl knockout match had the most runs scored in total ?")[0]["args"]
+    assert match["subject"] == "league" and match["per"] == "match"
+    spinners = plan("who is the best spinner for RCB?")
+    assert spinners[0]["args"]["bowl_kind"] == "spin" and spinners[0]["definition"].startswith("Best spinner")
+    index = stats.PlayerIndex([stats.Player(35320, "Sachin Tendulkar", 78), stats.Player(253802, "Virat Kohli", 300)])
+    for p in index.players:
+        for key in stats._name_keys(p.name):
+            index.keys.setdefault(key, []).append(p)
+    q = "Was Sachin Tendulkar a slower batter than Virat Kohli?"
+    calls = stats.plan(q, resolve_entities(q), None, index=index, mode="rules")[0]
+    assert [c["args"]["metric"] for c in calls] == ["strike_rate", "strike_rate"] and calls[1]["args"].get("adjust") is True
+    assert len(calls[0]["args"]["player"]) == 2
+
+
+def test_metric_guard_and_claim_check():
+    q = "which batter has hit the most sixes in the 20th over of the innings?"
+    calls, _ = stats.slices.enforce_coverage([{"name": "over_range_leaders", "args": {"from_over": 20, "to_over": 20, "role": "bat"}}], q)
+    assert calls[0]["name"] == "slice_stats" and calls[0]["args"]["metric"] == "sixes"   # not the tool's strike rate
+    block = {"type": "table", "title": "t", "columns": ["player", "runs", "balls", "sr", "6s"],
+             "rows": [["Marcus Stoinis", 250, 84, 297.62, 22], ["MS Dhoni", 844, 347, 243.23, 72]]}
+    results = [{"name": "over_range_leaders", "args": {}, "blocks": [block]}]
+    assert not stats.claims_hold("Marcus Stoinis hit the most sixes in the 20th over, with 22.", results)
+    assert stats.claims_hold("MS Dhoni hit the most sixes in the 20th over (72).", results)
+    assert stats.claims_hold("Stoinis has the highest strike rate, 297.62.", results)
+
+
+def test_commentary_markup_is_stripped_for_the_llm():
+    from backend.agent.match_facts import plain_text
+    assert plain_text("<B>Edged</B> between keeper and slip. <i>Four!</i> R &amp; R") == "Edged between keeper and slip. Four! R & R"

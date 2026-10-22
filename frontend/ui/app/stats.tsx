@@ -53,6 +53,12 @@ const LABELS: Record<string, string> = {
   wickets: "W", economy: "Econ", "strike rate": "SR", average: "Avg", "bowling average": "Avg", "balls per wicket": "Balls / W",
   "run rate": "RR", "boundary %": "Bdry %", "dot-ball %": "Dot %", "sixes per 100 balls": "6s / 100 b",
   "balls per boundary": "Balls / bdry", "highest score": "HS", "4s+6s": "4s+6s",
+  bowl_kind: "Bowling type", bat_hand: "Bat hand", "dot balls": "Dots", ducks: "Ducks", hundreds: "100s",
+  home_played: "Home P", home_won: "Home W", home_win_pct: "Home win %", away_played: "Away P", away_win_pct: "Away win %",
+  share_of_overs: "Share of overs %", league_econ: "League econ", balls_per_wkt: "Balls / W", league_balls_per_wkt: "League balls / W",
+  rr_here: "RR here", rr_league: "League RR", econ_here: "Econ here", econ_league: "League econ", dot_pct_here: "Dot % here",
+  dot_pct_league: "League dot %", kind: "Type", cue: "Cue", mentions: "Mentions", example: "Example",
+  bowled_lbw_pct_here: "Bowled+lbw % here", bowled_lbw_pct_league: "League bowled+lbw %", wickets_here: "Wickets",
 };
 
 // "strike rate (shrunk)" -> "SR (adj.)"; "economy index" -> "Econ index": the slice compiler's derived columns.
@@ -63,6 +69,28 @@ function label(column: string) {
   const index = column.match(/^(.*) index$/);
   if (index) return `${LABELS[index[1]] ?? index[1]} index`;
   return column;
+}
+
+// The column a leaderboard is ranked by: a sample-adjusted or season-adjusted value when present, else the first measure.
+function keyColumn(block: { columns: string[]; rows: Cell[][] }) {
+  const adjusted = block.columns.findIndex((c) => / \(shrunk\)$| index$/.test(c));
+  if (adjusted >= 0) return adjusted;
+  return block.rows.length && typeof block.rows[0][1] === "number" ? 1 : -1;
+}
+// Bar length = share of the best row. A table ranked low-to-high (economy, average conceded)
+// has its best value first, so there the scale is best / value: the top row is always the full bar.
+type Scale = (value: number) => number;
+function barScale(block: { rows: Cell[][] }, col: number): Scale | null {
+  if (col < 0) return null;
+  const nums = block.rows.map((r) => r[col]).filter((v): v is number => typeof v === "number" && v > 0);
+  if (nums.length < 2) return null;
+  const ascending = nums[0] < nums[nums.length - 1];
+  const best = ascending ? Math.min(...nums) : Math.max(...nums);
+  return ascending ? (v) => best / v : (v) => v / best;
+}
+function Bar({ value, scale }: { value: Cell; scale: Scale | null }) {
+  if (typeof value !== "number" || !scale || value <= 0) return <>{cell(value)}</>;
+  return <span className="databar" style={{ "--w": `${Math.max(4, Math.min(1, scale(value)) * 100)}%` } as React.CSSProperties}>{cell(value)}</span>;
 }
 
 // A table is a ranking when it leads with a name, unless its second column is a split
@@ -110,6 +138,8 @@ function BlockCard({ block: raw, onPlayer, compact }: { block: Block; onPlayer?:
   if (raw.type === "text") return <Note text={raw.text} />;
   const block = compact ? compactBlock(raw) : raw;
   const nameColumn = PLAYER_COLUMNS.includes(block.columns[0]) ? 0 : -1;
+  const barCol = isRanked(block) ? keyColumn(block) : -1;
+  const scale = barScale(block, barCol);
   return <article className={`detail-card stats-card${compact ? " compact" : ""}`}>
     <div className="card-title"><h3>{block.title}</h3></div>
     {block.rows.length === 0
@@ -119,7 +149,8 @@ function BlockCard({ block: raw, onPlayer, compact }: { block: Block; onPlayer?:
         <tbody>{block.rows.map((row, index) => <tr key={index}>{row.map((value, col) => <td key={col}>
           {col === nameColumn && onPlayer && typeof value === "string"
             ? <button className="stats-player" onClick={() => onPlayer(value)}>{value}</button>
-            : col === 0 ? <strong>{cell(value)}</strong> : col === 1 ? <b>{cell(value)}</b> : cell(value)}
+            : col === 0 ? <strong>{cell(value)}</strong> : col === barCol ? <Bar value={value} scale={scale} />
+              : col === 1 ? <b>{cell(value)}</b> : cell(value)}
         </td>)}</tr>)}</tbody>
       </table></div>}
   </article>;
@@ -164,12 +195,15 @@ function ChatTable({ block }: { block: Extract<Block, { type: "table" }> }) {
   const totalled = String(block.rows[block.rows.length - 1]?.[0]) === "Total";
   const rows = open ? block.rows : totalled ? block.rows.slice(-CHAT_ROWS) : block.rows.slice(0, CHAT_ROWS);
   const ranked = isRanked(block);
+  const barCol = ranked ? keyColumn(block) : -1;
+  const scale = barScale(block, barCol);
   return <div className="chat-stats-table">
     <h4>{block.title}</h4>
     {block.rows.length === 0 ? <p className="stats-note">No rows.</p> : <div className="table-wrap"><table className={ranked ? "ranked" : undefined}>
       <thead><tr>{ranked && <th>#</th>}{block.columns.filter((c) => c !== "match_id").map((column) => <th key={column}>{label(column)}</th>)}</tr></thead>
       <tbody>{rows.map((row, index) => <tr key={index}>{ranked && <td>{index + 1}</td>}
-        {row.filter((_, col) => block.columns[col] !== "match_id").map((value, col) => <td key={col}>{col === 0 ? <strong>{cell(value)}</strong> : cell(value)}</td>)}</tr>)}</tbody>
+        {row.map((value, col) => [value, col] as const).filter(([, col]) => block.columns[col] !== "match_id").map(([value, col]) =>
+          <td key={col}>{col === 0 ? <strong>{cell(value)}</strong> : col === barCol ? <Bar value={value} scale={scale} /> : cell(value)}</td>)}</tr>)}</tbody>
     </table></div>}
     {block.rows.length > CHAT_ROWS && <button className="chat-stats-more" onClick={() => setOpen(!open)}>{open ? "Show fewer" : `Show all ${block.rows.length} rows`}</button>}
   </div>;
@@ -357,7 +391,10 @@ export function StatsPanel({ season, seasons, matchOpen, onBackToMatch, onClose 
           ? <PlayerResults query={playerSearch} onPick={setPlayerId} />
           : <div className="empty-state"><strong>Find a player</strong><p>Season-by-season numbers and powerplay / middle / death splits. Tip: click any name in Leaders.</p></div>)}
       {tab === "matchups" && <Blocks path={`/api/stats/matchup?batter=${encodeURIComponent(pair[0])}&bowler=${encodeURIComponent(pair[1])}`} />}
-      {tab === "teams" && <Blocks path={!team1 ? "/api/stats/champions" : team2 ? `/api/stats/h2h?team1=${team1}&team2=${team2}` : `/api/stats/teams/${team1}`} />}
+      {tab === "teams" && <>
+        <Blocks path={!team1 ? "/api/stats/champions" : team2 ? `/api/stats/h2h?team1=${team1}&team2=${team2}` : `/api/stats/teams/${team1}`} />
+        {!team1 && <Blocks path="/api/stats/home?limit=20" />}
+      </>}
       {tab === "grounds" && <><GroundReport name={ground} />
         <Blocks path={`/api/stats/toss?venue=${encodeURIComponent(ground)}`} /></>}
     </div>
@@ -438,9 +475,11 @@ const SUBJECTS: [string, string][] = [["batter", "Batters"], ["bowler", "Bowlers
 const METRICS: Record<string, [string, string][]> = {
   batter: [["runs", "Runs"], ["strike_rate", "Strike rate"], ["average", "Average"], ["sixes", "Sixes"], ["fours", "Fours"],
     ["six_pct", "Sixes per 100 balls"], ["boundary_pct", "Boundary %"], ["dot_pct", "Dot-ball %"],
-    ["balls_per_boundary", "Balls per boundary"], ["high_score", "Highest score (one innings)"]],
+    ["balls_per_boundary", "Balls per boundary"], ["high_score", "Highest score (one innings)"], ["dots", "Dot balls faced"],
+    ["boundaries", "Boundaries"], ["ducks", "Ducks"], ["fifties", "Fifties"], ["hundreds", "Hundreds"]],
   bowler: [["wickets", "Wickets"], ["economy", "Economy"], ["bowling_average", "Average"], ["bowling_strike_rate", "Balls per wicket"],
-    ["dot_pct", "Dot-ball %"], ["boundary_pct", "Boundary % conceded"], ["sixes", "Sixes conceded"]],
+    ["dot_pct", "Dot-ball %"], ["dots", "Dot balls"], ["boundary_pct", "Boundary % conceded"], ["boundaries", "Boundaries conceded"],
+    ["sixes", "Sixes conceded"]],
   batting_team: [["run_rate", "Run rate"], ["runs", "Runs"], ["high_score", "Highest total"], ["sixes", "Sixes"],
     ["boundary_pct", "Boundary %"], ["dot_pct", "Dot-ball %"], ["average", "Runs per wicket"]],
   bowling_team: [["economy", "Economy"], ["wickets", "Wickets"], ["bowling_average", "Runs per wicket"], ["dot_pct", "Dot-ball %"]],
@@ -458,6 +497,12 @@ const PRESETS: { label: string; spec: Spec; allTime?: boolean; note?: string }[]
   { label: "Chasing at 12+ an over", spec: { subject: "batter", metric: "strike_rate", innings: "2", rrr_min: "12", shrink: "1" }, allTime: true,
     note: "Balls faced when the required rate was above 12, ranked by strike rate adjusted for sample size." },
   { label: "Death bowling after winning the toss", spec: { subject: "bowler", metric: "economy", phase: "death", toss: "won", shrink: "1" }, allTime: true },
+  { label: "Kohli v pace and spin", spec: { subject: "batter", metric: "strike_rate", player: "Virat Kohli", split: "bowl_kind" }, allTime: true },
+  { label: "Best spinners", spec: { subject: "bowler", metric: "economy", bowl_kind: "spin", shrink: "1", min_balls: "240" }, allTime: true,
+    note: "Spinners ranked by economy adjusted for sample size (min 240 balls). Bowling type comes from ESPN player profiles." },
+  { label: "Death bowling to left-handers", spec: { subject: "bowler", metric: "economy", phase: "death", bat_hand: "left", shrink: "1" }, allTime: true },
+  { label: "Most ducks in a season", spec: { subject: "batter", metric: "ducks", per: "season" }, allTime: true },
+  { label: "Biggest playoff run-fests", spec: { subject: "league", metric: "runs", per: "match", stage: "playoff" }, allTime: true },
 ];
 const DEFAULT_SPEC: Spec = { subject: "batter", metric: "strike_rate", phase: "death", shrink: "1" };
 
@@ -510,6 +555,9 @@ function Explore({ yearParam, onAllTime, onPlayer }: { yearParam: string; onAllT
         {select("team", "For", teams, "All teams")}
         {select("opp", "Against", teams, "All teams")}
         {select("venue", "Ground", grounds.map((g) => [g, g]), "All grounds")}
+        {select("venue_type", "Home/away", [["home", "At home"], ["away", "Away"]])}
+        {select("bowl_kind", "Bowling type", [["pace", "Pace"], ["spin", "Spin"]])}
+        {select("bat_hand", "Batter hand", [["left", "Left-handed"], ["right", "Right-handed"]])}
       </div>
       <div className="innings-filter stats-controls">
         {input("target_min", "Target ≥", "e.g. 180", 6)}
@@ -517,7 +565,8 @@ function Explore({ yearParam, onAllTime, onPlayer }: { yearParam: string; onAllT
         {select("wickets_in_hand", "Wickets in hand", [["0-3", "0-3"], ["4-6", "4-6"], ["7-10", "7-10"]])}
         {input("batter_balls", "Batter's balls", "e.g. 1-10", 7)}
         {select("split", "Compare by", [["innings", "Innings"], ["phase", "Phase"], ["season", "Season"], ["venue", "Ground"],
-          ["opposition", "Opposition"], ["result", "Result"], ["toss", "Toss"]], "No split")}
+          ["opposition", "Opposition"], ["result", "Result"], ["toss", "Toss"], ["bowl_kind", "Pace v spin"], ["bat_hand", "Batter hand"]], "No split")}
+        {select("per", "Rank", [["season", "Single seasons"], ["match", "Single matches"]], "Careers")}
         <label><input type="checkbox" checked={draft.shrink === "1"} onChange={(e) => set("shrink", e.target.checked ? "1" : "")} /> Sample-adjusted</label>
         <label><input type="checkbox" checked={draft.adjust === "1"} onChange={(e) => set("adjust", e.target.checked ? "1" : "")} /> Vs league that season</label>
         {select("order", "Order", [["best", "Best first"], ["worst", "Worst first"]], "")}

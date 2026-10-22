@@ -48,10 +48,14 @@ SLICE_TOOLS = [
             "wickets_in_hand": {"type": "string", "description": "e.g. 0-3"},
             "batter_balls": {"type": "string", "description": "e.g. 1-10"},
             "split": {"type": "string", "enum": sorted(analytics.SPLITS)},
+            "per": {"type": "string", "enum": ["career", "season", "match"]},
+            "bowl_kind": {"type": "string", "enum": ["pace", "spin"]}, "bat_hand": {"type": "string", "enum": ["left", "right"]},
+            "venue_type": {"type": "string", "enum": ["home", "away"]},
             "adjust": {"type": "boolean"}, "shrink": {"type": "boolean"},
             "order": {"type": "string", "enum": ["best", "worst"]}, "min_balls": {"type": "integer"}, "year": _YEAR},
         ["subject", "metric"]),
     _fn("hattricks", "Every hat-trick; who has the most.", {"team": _TEAM, "year": _YEAR}),
+    _fn("home_record", "Each team's home and away win %.", {"order": {"type": "string", "enum": ["best", "worst"]}, "year": _YEAR}),
     _fn("toss_stats", "Toss decisions and how often the toss winner won: overall, or by season, venue or team.",
         {"by": {"type": "string", "enum": ["season", "venue", "team"]}, "venue": {"type": "string"}, "year": _YEAR}),
     _fn("awards", "Player-of-the-match awards: the leaders, or one player's count.",
@@ -68,19 +72,22 @@ PLANNER_HINTS = """Filters other tools lack -> slice_stats(subject, metric, filt
 runs at Wankhede; strike rate chasing 180+ (target_min=180); required rate above 12 (rrr_min=12); first 10 balls (batter_balls=1-10).
 Kohli chasing vs batting first -> slice_stats(subject=batter, metric=average, player=[Virat Kohli], split=innings).
 "best"/"most effective" (a judgment) -> shrink=true; "highest"/"most" (literal) -> no shrink. Era-relative -> adjust=true.
-hat-tricks -> hattricks | player of the match -> awards | toss -> toss_stats | impact player -> impact_subs | partnerships, opening pairs -> partnerships."""
+Most ducks in a season -> per=season | which match had the most runs -> subject=league, per=match | dot balls (count) -> dots.
+Spinners / against spin -> bowl_kind=spin; left-handers -> bat_hand=left; at home -> venue_type=home.
+hat-tricks -> hattricks | player of the match -> awards | toss -> toss_stats | impact player -> impact_subs | partnerships -> partnerships | home win % -> home_record."""
 
 # ----------------------------------------------------------------- reading the wording
 
 NUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
 N = r"(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)"
 EXTENDED = {"result", "toss", "rrr_min", "rrr_max", "wickets_in_hand", "batter_balls", "target_min", "target_max",
-            "stage", "venue", "opp"}
+            "stage", "venue", "opp", "per", "bowl_kind", "bat_hand", "venue_type"}
 WORDS = {"overs": "these specific overs", "phase": "this phase", "innings": "one innings (batting first or chasing)",
          "stage": "finals or playoffs only", "result": "only matches won or lost", "toss": "the toss result",
          "venue": "one ground", "target_min": "the size of the target", "target_max": "the size of the target",
          "rrr_min": "the required rate", "rrr_max": "the required rate", "wickets_in_hand": "wickets in hand",
-         "batter_balls": "a batter's first balls", "opp": "one opposition team"}
+         "batter_balls": "a batter's first balls", "opp": "one opposition team", "per": "single seasons or matches",
+         "bowl_kind": "spin or pace", "bat_hand": "batting hand", "venue_type": "home or away"}
 
 
 def _n(token: str) -> int:
@@ -155,6 +162,32 @@ def parse_filters(question: str) -> dict[str, Any]:
     if roles.get("opp") and about_stats and not re.search(r"\bhead[- ]to[- ]head\b|\brecord\b|\bresults?\b|\brivalry\b"
                                                          r"|\bwon more\b|\bwins? against\b|\bbeaten\b|\bbeat\b|\bleads?\b", text):
         f["opp"] = roles["opp"]                           # "most runs against CSK" (not "for CSK")
+    plain = text.replace("-", " ")
+    if re.search(r"\bin (?:a|any|one|a single|single) (?:ipl )?season\b|\bin an (?:ipl )?season\b|\bsingle season\b", plain):
+        f["per"] = "season"                               # "most ducks in a season": rank player-seasons
+    elif re.search(r"\bwhich (?:ipl )?(?:\w+ )?(?:match|game)\b|\bin a (?:single )?(?:match|game)\b|\bin one (?:match|game)\b"
+                   r"|\bsingle (?:match|game)\b|\bin an innings\b|\bin a single innings\b|\bin one innings\b", plain):
+        f["per"] = "match"
+    if f.get("per") == "match" and re.search(r"\bhighest (?:individual |team )?(?:score|total)s?\b", plain):
+        f.pop("per")                                      # an innings-level high score already is one innings
+    spin = re.search(r"\b(?:leg |off |wrist |finger |left arm )?spin(?:ners?| bowl\w*)?\b|\bslow bowl\w*\b", plain)
+    pace = re.search(r"\bpace(?:rs?| bowl\w*)?\b|\bseam(?:ers?| bowl\w*)?\b|\bfast bowl\w*\b|\bquicks\b|\bfast medium\b", plain)
+    if spin and pace:
+        pass                                              # "spin vs pace" is a split (SPLIT_WORDS)
+    elif spin:
+        f["bowl_kind"] = "spin"
+    elif pace:
+        f["bowl_kind"] = "pace"
+    left = re.search(r"\bleft hand(?:ed|ers?)?\b|\blefties\b|\bleft handers?\b", plain)
+    right = re.search(r"\bright hand(?:ed|ers?)?\b|\bright handers?\b", plain)
+    if left and not right:
+        f["bat_hand"] = "left"
+    elif right and not left:
+        f["bat_hand"] = "right"
+    if re.search(r"\bat home\b|\bhome (?:games|matches|ground|grounds|venue|conditions)\b", plain):
+        f["venue_type"] = "home"
+    elif re.search(r"\baway (?:from home|games|matches)\b|\bon the road\b", plain):
+        f["venue_type"] = "away"
     split = parse_split(text)
     for key in {"innings": ("innings",), "result": ("result",), "toss": ("toss",), "phase": ("phase", "overs"),
                 "venue": ("venue",)}.get(split or "", ()):
@@ -170,6 +203,9 @@ SPLIT_WORDS = [
     (r"\b(?:by|each|every|per) (?:venue|ground)\b|\bat each (?:venue|ground)\b", "venue"),
     (r"\bagainst (?:each|every) (?:team|side|opposition)\b|\bby opposition\b", "opposition"),
     (r"\b(?:wins? (?:vs\.?|versus|and|or) (?:losses|defeats))\b|\bwhen (?:they|he) (?:win|won) (?:vs|and|or) (?:lose|lost)\b", "result"),
+    (r"\bspin (?:vs\.?|versus|or|and|compared (?:to|with)) pace\b|\bpace (?:vs\.?|versus|or|and|compared (?:to|with)) spin\b", "bowl_kind"),
+    (r"\bleft (?:vs\.?|versus|or|and) right[- ]hand", "bat_hand"),
+    (r"\bright (?:vs\.?|versus|or|and) left[- ]hand", "bat_hand"),
 ]
 
 
@@ -187,7 +223,10 @@ def subject_of(text: str, players: list[Any], teams: list[str]) -> str:
     bowl = bool(BOWL_WORDS.search(plain)) and not re.search(r"\b(batters?|batsm[ae]n|scored|runs scored)\b", plain)
     if players:
         return "bowler" if bowl else "batter"
-    if (TEAM_WORDS.search(plain) or re.search(r"\b(?:team )?totals?\b", plain)) \
+    if re.search(r"\bwhich (?:ipl )?(?:\w+ )?(?:match|game)\b|\bmatch aggregate\b|\bboth (?:teams|sides)\b|\bcombined\b", plain) \
+            and not re.search(r"\b(batters?|bowlers?|batsm[ae]n|players?|who)\b", plain):
+        return "league"                                   # "which knockout match had the most runs": both innings
+    if (TEAM_WORDS.search(plain) or re.search(r"\b(?:team )?totals?\b(?! (?:runs|in a match))", plain)) \
             and not re.search(r"\b(batters?|batsm[ae]n|bowlers?|players?)\b", plain):
         return "bowling_team" if bowl else "batting_team"
     who = re.search(r"\b(who|whose|which (?:batter|bowler|player)s?|batters?|bowlers?|batsm[ae]n)\b", plain)
@@ -207,13 +246,16 @@ def explicit_metric(text: str, subject: str) -> str | None:
 def metric_of(text: str, subject: str, default: str | None = "auto") -> str | None:
     rules = [
         (r"\bballs per boundary\b", "balls_per_boundary"), (r"\bboundary (?:%|percent|percentage|rate)\b", "boundary_pct"),
-        (r"\bdot[- ]ball (?:%|percent|percentage)\b|\bdot balls?\b|\bdot %", "dot_pct"),
+        (r"\bdot[- ]ball (?:%|percent|percentage|rate)\b|\bdot %|\bdot[- ]ball percent", "dot_pct"),
+        (r"\bdot[- ]?balls?\b|\bdots\b", "dots"),
+        (r"\bducks?\b", "ducks"), (r"\bfift(?:y|ies)\b|\bhalf[- ]centur(?:y|ies)\b|\b50s\b", "fifties"),
+        (r"\bhundreds\b|\bcenturies\b|\btons\b|\b100s\b", "hundreds"),
         (r"\bsixes per\b|\bsix (?:rate|frequency|%|percentage)\b|\bsix[- ]hitting rate\b", "six_pct"),
         (r"\beconomy\b|\beconomical\b|\bruns per over\b", "economy"),
         (r"\bstrike[- ]rate\b|\bscoring rate\b|\b(?:fastest|quickest) scor|\bscor\w* (?:the )?(?:fastest|quickest)\b"
          r"|\b(?:fastest|quickest)\b(?! (?:to|ball|delivery|fifty|50|hundred|century))", "strike_rate"),
         (r"\brun[- ]rate\b", "run_rate"), (r"\baverages?\b", "average"),
-        (r"\bsixes\b|\bmaximums\b|\bsix\b", "sixes"), (r"\bfours\b|\bboundaries\b", "fours"),
+        (r"\bsixes\b|\bmaximums\b|\bsix\b", "sixes"), (r"\bboundaries\b", "boundaries"), (r"\bfours\b", "fours"),
         (r"\bwickets?\b|\bscalps\b|\bdismissals\b", "wickets"), (r"\bruns\b|\bscored\b|\bscorers?\b", "runs"),
     ]
     if re.search(r"\bhighest (?:individual |team )?(?:score|scores|totals?|knocks?|innings)\b|\bbiggest (?:score|total|knock)s?\b"
@@ -273,6 +315,12 @@ DEFINITIONS = [
      "Six-hitting = sixes per 100 balls faced, shrunk toward the league (min 120 balls); total sixes is the second view.",
      [{"subject": "batter", "metric": "six_pct", "shrink": True, "min_balls": 120},
       {"subject": "batter", "metric": "sixes"}]),
+    (r"\b(?:best|greatest|finest|top)\s+(?:ipl\s+)?(?:left[- ]handed\s+|right[- ]handed\s+)?(?:batters?|batsm[ae]n)\b",
+     "Best batter = most runs (the volume measure); average and strike rate, shrunk toward the league (min 500 balls), "
+     "are the second and third views.",
+     [{"subject": "batter", "metric": "runs"},
+      {"subject": "batter", "metric": "average", "min_balls": 500},
+      {"subject": "batter", "metric": "strike_rate", "shrink": True, "min_balls": 500}]),
     (r"\bunder pressure\b|\bpressure (?:chases|situations)\b|\bin (?:tight|tough) chases\b",
      "Pressure = chasing when the required rate is above 10 an over. Ranked by strike rate, shrunk toward the league "
      "(min 60 balls); total runs in those situations is the second view.",
@@ -281,11 +329,61 @@ DEFINITIONS = [
 ]
 
 
+KIND_WORDS = re.compile(r"\b(?:best|greatest|top|most effective|finest)\s+(?:ipl\s+)?(?:leg[- ]?|off[- ]?|wrist[- ]?|finger[- ]?)?"
+                        r"(spinners?|spin bowlers?|pacers?|pace bowlers?|fast bowlers?|seamers?|quicks)\b")
+
+
 def definition_calls(text: str, year: dict[str, str], extra: dict[str, Any]) -> list[dict[str, Any]]:
+    if (m := KIND_WORDS.search(text)):
+        kind = "spin" if m.group(1).startswith("spin") else "pace"
+        definition = (f"Best {'spinner' if kind == 'spin' else 'pace bowler'} = economy, shrunk toward the league so a short "
+                      "spell cannot top it (min 240 balls); total wickets is the second view.")
+        return [{"name": "slice_stats", "args": {"subject": "bowler", "metric": metric, "bowl_kind": kind, **spec, **extra, **year},
+                 "definition": definition}
+                for metric, spec in (("economy", {"shrink": True, "min_balls": 240}), ("wickets", {}))]
     for pattern, definition, specs in DEFINITIONS:
         if re.search(pattern, text):
-            return [{"name": "slice_stats", "args": {**spec, **extra, **year}, "definition": definition} for spec in specs]
+            hand = parse_filters(text)
+            hand = {k: hand[k] for k in ("bat_hand", "team", "opp", "venue_type") if k in hand}
+            return [{"name": "slice_stats", "args": {**spec, **extra, **hand, **year}, "definition": definition} for spec in specs]
     return []
+
+
+# ----------------------------------------------------------------- comparisons
+
+COMPARE = re.compile(r"\b(slower|faster|quicker|better|worse|more (?:consistent|prolific|economical|aggressive|destructive|"
+                     r"dangerous|reliable)|higher|lower|bigger)\b[^?]*\bthan\b")
+
+
+def comparison_calls(text: str, players: list[Any], year: dict[str, str]) -> list[dict[str, Any]]:
+    """'Was Sachin slower than Virat?': both players, the metric the adjective names, and the same figure against
+    the league in the seasons each played (raw strike rates mix eras: 2008 is not 2024)."""
+    if len(players) < 2 or not COMPARE.search(text):
+        return []
+    adjective = COMPARE.search(text).group(1)
+    plain = re.sub(r"\b(bowling|batting) (first|second)\b", " ", text)
+    bowl = bool(BOWL_WORDS.search(plain)) or "economical" in adjective
+    subject = "bowler" if bowl else "batter"
+    if bowl:
+        metrics = ["economy", "wickets"] if adjective in ("better", "worse") else ["economy"]
+    elif adjective in ("slower", "faster", "quicker") or "aggressive" in adjective or "destructive" in adjective:
+        metrics = ["strike_rate"]
+    elif "prolific" in adjective:
+        metrics = ["runs"]
+    elif "consistent" in adjective or "reliable" in adjective:
+        metrics = ["average"]
+    else:
+        metrics = ["average", "strike_rate"]
+    named = explicit_metric(text, subject)
+    if named and named not in metrics:
+        metrics = [named]
+    names = [p.name for p in players[:2]]
+    calls = [{"name": "slice_stats", "args": {"subject": subject, "metric": m, "player": names, **year}} for m in metrics]
+    era = next((m for m in metrics if analytics.METRICS[m][1]), None)
+    if era:
+        calls.append({"name": "slice_stats", "args": {"subject": subject, "metric": era, "player": names, "adjust": True, **year},
+                      "keep": {"adjust": True}})        # deliberate: kept when grounding drops unasked adjustments
+    return calls[:3]
 
 
 # ----------------------------------------------------------------- keyword rules
@@ -295,6 +393,9 @@ def family_calls(text: str, teams: list[str], players: list[Any], year: dict[str
     team = {"team": teams[0]} if teams else {}
     if re.search(r"\bhat[- ]?tricks?\b", text):
         return [{"name": "hattricks", "args": {**team, **year}}]
+    if re.search(r"\bhome (?:win|winning|record|advantage|form)\b|\bwin(?:ning)? (?:%|percentage|percent|rate|record) at home\b"
+                 r"|\bhome (?:matches|games) won\b", text):
+        return [{"name": "home_record", "args": {"order": "worst" if re.search(r"\b(worst|lowest|poorest)\b", text) else "best", **year}}]
     if re.search(r"\b(?:man|player) of the match\b|\bpotm\b|\bmotm\b|\bpom awards?\b", text):
         return [{"name": "awards", "args": {**({"player": players[0].name} if players else team), **year}}]
     if re.search(r"\bimpact (?:player|sub|substitute)s?\b", text):
@@ -327,6 +428,9 @@ def family_calls(text: str, teams: list[str], players: list[Any], year: dict[str
     return []
 
 
+NEW_METRICS = {"dots", "boundaries", "ducks", "dot_pct", "boundary_pct", "six_pct", "balls_per_boundary"}
+
+
 def slice_rule(question: str, players: list[Any], teams: list[str], year: dict[str, str]) -> list[dict[str, Any]]:
     """A slice when the wording needs a filter, split or adjustment that no older tool has."""
     text = question.casefold().replace("-", " ").replace("–", " ")
@@ -342,7 +446,8 @@ def slice_rule(question: str, players: list[Any], teams: list[str], year: dict[s
         keys.discard("venue")                             # a ground's scoring, totals, par: venue_stats / ground_report
     subject_guess = subject_of(text, players, teams)
     innings_level = metric_of(text, subject_guess) == "high_score" and bool(f)
-    if not (keys or split or adjust or innings_level):
+    new_metric = explicit_metric(text, subject_guess) in NEW_METRICS          # dot balls, boundaries, ducks: no older tool
+    if not (keys or split or adjust or innings_level or new_metric):
         return []
     if set(f) <= {"stage", "innings"} and not players and not _evaluative(text) and \
             not re.search(r"\b(most|highest|top|who|which (?:batter|bowler|player))\b", text):
@@ -359,6 +464,14 @@ def slice_rule(question: str, players: list[Any], teams: list[str], year: dict[s
             args["vs"] = players[1].name
     if split:
         args["split"] = split
+    named_metric = explicit_metric(text, subject)
+    keep: dict[str, Any] = {}
+    for key in ("bowl_kind", "bat_hand"):                 # "how does Kohli bat against spin": spin and pace side by side
+        if players and len(players) == 1 and args.get(key) and not named_metric and not split:
+            args.pop(key)
+            args.update(split=key, metric="strike_rate" if subject == "batter" else "economy")
+            metric = args["metric"]
+            keep = {"split": key, key: None}
     if adjust and analytics.METRICS[metric][1]:
         args["adjust"] = True
     if _evaluative(text) and not players and analytics.METRICS[metric][1] == "B":
@@ -366,7 +479,7 @@ def slice_rule(question: str, players: list[Any], teams: list[str], year: dict[s
     args["order"] = order_of(text, metric)
     if (m := re.search(r"\bmin(?:imum)?\.?\s+(?:of\s+)?(\d{2,4})\s+balls\b", text)):
         args["min_balls"] = int(m.group(1))
-    return [{"name": "slice_stats", "args": args}]
+    return [{"name": "slice_stats", "args": args, **({"keep": keep} if keep else {})}]
 
 
 # ----------------------------------------------------------------- coverage guard
@@ -457,6 +570,18 @@ def ground_slice(args: dict[str, Any], question: str) -> dict[str, Any]:
         args.pop("adjust")
     if args.get("subject") in ("batter", "batting_team") and metric_of(text, args["subject"]) == "high_score":
         args["metric"] = "high_score"                     # "highest total while chasing" is one innings, not a sum
+    if args.get("metric") in analytics.METRICS:
+        args["order"] = order_of(text, args["metric"])    # "most boundaries conceded" is the top of the count, whatever
+    return args                                           # a planner thinks of conceding
+
+
+def _apply_keep(args: dict[str, Any], call: dict[str, Any]) -> dict[str, Any]:
+    """Arguments a rule chose deliberately ("keep"): a value is forced, None means the key stays out."""
+    for key, value in (call.get("keep") or {}).items():
+        if value is None:
+            args.pop(key, None)
+        else:
+            args[key] = value
     return args
 
 
@@ -467,14 +592,14 @@ def enforce_coverage(calls: list[dict[str, Any]], question: str) -> tuple[list[d
     fixed = []
     for call in calls:
         if call["name"] == "slice_stats":
-            call = {**call, "args": ground_slice(call.get("args") or {}, question)}
+            call = {**call, "args": _apply_keep(ground_slice(call.get("args") or {}, question), call)}
         elif call["name"] in LEADER_TOOLS and subject_of(text, [], []) in ("batting_team", "bowling_team", "league") \
                 and (converted := _as_slice(call, question)) is not None:
             subject = subject_of(text, [], [])            # "run rate in the death overs" is the league, not batters
             converted.update(subject=subject, metric=metric_of(text, subject))
             call = {"name": "slice_stats", "args": {**converted, **f}, "converted_from": call["name"]}
         fixed.append(call)
-    calls = fixed
+    calls = [_metric_guard(call, question) for call in fixed]
     if not f or not calls:
         return calls, []
     out, gaps = [], []
@@ -484,7 +609,7 @@ def enforce_coverage(calls: list[dict[str, Any]], question: str) -> tuple[list[d
             out.append(call)
             continue
         if call["name"] == "slice_stats":
-            out.append({**call, "args": {**(call.get("args") or {}), **lack}})
+            out.append({**call, "args": _apply_keep({**(call.get("args") or {}), **lack}, call)})
             continue
         converted = _as_slice(call, question)
         if converted is not None and call["name"] in ("phase_leaders", "over_range_leaders", "batting_leaders", "bowling_leaders"):
@@ -502,6 +627,47 @@ def enforce_coverage(calls: list[dict[str, Any]], question: str) -> tuple[list[d
         out.append(call)
         gaps.extend(WORDS[k] for k in lack if WORDS[k] not in gaps)
     return out, gaps
+
+
+RANKING = re.compile(r"\b(most|highest|lowest|least|fewest|best|worst|top|leading|leaders?|who|which)\b")
+
+
+def ranked_metric(call: dict[str, Any]) -> str | None:
+    """The metric a call's table is ranked by (None when it is not a leaderboard)."""
+    args = call.get("args") or {}
+    name = call["name"]
+    if name == "slice_stats":
+        return args.get("metric")
+    if name == "batting_leaders":
+        return BAT_SORT.get(args.get("sort") or "runs", "other")
+    if name == "bowling_leaders":
+        return BOWL_SORT.get(args.get("sort") or "wkts", "other")
+    if name == "phase_leaders":
+        return "economy" if args.get("role") == "bowl" else "strike_rate"
+    if name == "over_range_leaders":
+        return {"sr": "strike_rate", "runs": "runs", "econ": "economy", "wkts": "wickets"}.get(
+            args.get("sort") or ("econ" if args.get("role") == "bowl" else "sr"), "other")   # an unknown sort ran as sr
+    return None
+
+
+def _metric_guard(call: dict[str, Any], question: str) -> dict[str, Any]:
+    """The metric the question names must be the one the table is ranked by: "most sixes in the 20th over" was
+    answered from a table ranked by strike rate (Stoinis first; Dhoni had 72 sixes)."""
+    text = question.casefold()
+    ranked = ranked_metric(call)
+    if not ranked or not RANKING.search(text):
+        return call
+    subject = (call.get("args") or {}).get("subject") or (_as_slice(call, question) or {}).get("subject") or "batter"
+    named = explicit_metric(text, subject)
+    if not named or named == ranked or named not in analytics.SIDE_METRICS.get(subject, set()):
+        return call
+    if call["name"] == "slice_stats":
+        return {**call, "args": {**(call.get("args") or {}), "metric": named}}
+    converted = _as_slice(call, question)
+    if converted is None:
+        return call
+    return {"name": "slice_stats", "args": {**converted, "metric": named, **parse_filters(question)},
+            "converted_from": call["name"]}
 
 
 def coverage_gaps(question: str, calls: list[dict[str, Any]]) -> list[str]:
@@ -546,11 +712,13 @@ def to_argv(name: str, args: dict[str, Any], index: Any) -> list[str]:
                 if not re.match(pattern, value):
                     raise S.PlanError(f"{key} must look like {'17-20' if key == 'overs' else '1-10'}")
                 argv += [f"--{key.replace('_', '-')}", value]
-        for key, choices in (("phase", ("powerplay", "middle", "death")), ("stage", ("final", "playoff")),
+        for key, choices in (("per", ("career", "season", "match")), ("bowl_kind", ("pace", "spin")),
+                             ("bat_hand", ("left", "right")), ("venue_type", ("home", "away")),
+                             ("phase", ("powerplay", "middle", "death")), ("stage", ("final", "playoff")),
                              ("result", ("won", "lost")), ("toss", ("won", "lost")), ("split", tuple(analytics.SPLITS)),
                              ("order", ("best", "worst"))):
             if args.get(key) in choices:
-                argv += [f"--{key}", args[key]]
+                argv += [f"--{key.replace('_', '-')}", args[key]]
         if args.get("innings") in (1, 2, "1", "2"):
             argv += ["--innings", str(args["innings"])]
         if args.get("venue"):
@@ -569,6 +737,8 @@ def to_argv(name: str, args: dict[str, Any], index: Any) -> list[str]:
     team = ["--team", S._team(args["team"])] if args.get("team") else []
     if name == "hattricks":
         return ["hattricks", *team, *S._year(args)]
+    if name == "home_record":
+        return ["home", "--order", "worst" if args.get("order") == "worst" else "best", *S._year(args)]
     if name == "toss_stats":
         by = ["--by", args["by"]] if args.get("by") in ("season", "venue", "team") else []
         venue = ["--venue", S.GROUND_ALIASES.get(str(args["venue"]).casefold().strip(), str(args["venue"]))] \
@@ -600,6 +770,6 @@ def key_column(result: dict[str, Any]) -> str | None:
     if name == "slice_stats":
         return next((c for c in cols if c.endswith("(shrunk)")), None) or next((c for c in cols if c.endswith(" index")), None) \
             or (analytics.METRICS.get(args.get("metric") or "", (None,) * 5)[4])
-    return {"awards": "awards", "partnerships": "runs",
+    return {"awards": "awards", "partnerships": "runs", "home_record": "home_win_pct",
             "impact_subs": {"runs": "runs", "wkts": "wkts"}.get(args.get("sort") or "", "times_subbed_in"),
             "toss_stats": "toss_winner_won_pct"}.get(name)
