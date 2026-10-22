@@ -198,6 +198,16 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(events[-1]["event"], "result")
         self.assertIn("llm_response", [item["data"].get("node") for item in events[:-1]])
 
+    def test_streaming_encodes_dates_in_events(self):
+        # A table with a date column must not break the NDJSON stream (it once raised TypeError mid-answer).
+        import datetime
+        import json
+        event = {"event": "result", "data": {"reply": "ok", "blocks": [{"rows": [[datetime.date(2019, 5, 12)]]}]}}
+        with patch.object(agent, "iter_answer", return_value=iter([event])):
+            response = self.client.post("/api/agent/chat/stream", json={"message": "x", "history": [], "ui_context": {}})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.text.splitlines()[-1])["data"]["blocks"][0]["rows"][0][0], "2019-05-12")
+
 
 if __name__ == "__main__":
     unittest.main()

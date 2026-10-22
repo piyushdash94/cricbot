@@ -241,7 +241,7 @@ score") has no scope word to catch, so it is answered with the IPL leaderboard. 
 
 The v1 sets after these changes (rules): development 130/130, held-out 34/38 answers (89%; was 79%).
 
-## Gaps and traps set (24 questions, `qna_ipl_traps.jsonl`)
+## Gaps and traps set (27 questions, `qna_ipl_traps.jsonl`)
 
 Questions that once got confidently wrong answers: 15 from user transcripts (October 2026) plus 9
 similar ones written to test the fixes. Gold answers are read from the archive. They cover over
@@ -262,7 +262,7 @@ The failures they caught, and the fix for each:
 | "2000 runs" read as the 2000 season | Years are 2008 to now and never a run or wicket count |
 | An LLM reply with no number although the tables answered it | Treated as a non-answer; the table summary is used |
 
-Scores: rules 24/24 (these questions shaped the fixes, so this is a development score). With
+Scores: rules 27/27 (these questions shaped the fixes, so this is a development score). With
 Groq planning and writing answers, four runs scored 21, 23, 23 and 24 of 24; each miss in the
 earlier runs exposed a fix above. The two questions that need a match open on screen are covered by
 unit tests, since the runner cannot set screen context yet.

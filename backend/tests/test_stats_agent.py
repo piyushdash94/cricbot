@@ -517,10 +517,53 @@ def test_new_queries_run_on_the_fixture(db):
      {"kind": "needed_at_over", "over": 17}),
     ("who has bowled the least balls to take 100 ipl wickets?", "milestones", {"stat": "wickets", "value": 100, "by": "balls"}),
     ("how many matches have ended in a tie?", "match_results", {"kind": "tied"}),
+    ("in how many finals was the winning margin less than 10 runs?", "match_results",
+     {"kind": "close_runs", "value": 10, "stage": "final"}),
+    ("how many playoff matches were won by fewer than 3 wickets?", "match_results",
+     {"kind": "close_wickets", "value": 3, "stage": "playoff"}),
+    ("which team has defended 120 or lesser the most times in IPL?", "match_results", {"kind": "defended_under", "value": 121}),
+    ("which team has conceded 200 or more the most times while bowling first?", "match_results",
+     {"kind": "conceded_over", "value": 200, "innings": 1}),
+    ("which team scored 200+ batting first the most times?", "match_results", {"kind": "scored_over", "value": 200, "innings": 1}),
 ])
 def test_rule_planner_reaches_the_new_queries(question, tool, args):
     calls = stats.rule_plan(question, resolve_entities(question), None)
     assert calls and calls[0]["name"] == tool and args.items() <= calls[0]["args"].items()
+
+
+def test_query_rows_are_plain_json_and_stage_and_totals_filter(db):
+    # Dates come back as ISO strings: the chat stream encodes events with plain json.dumps.
+    for argv in (["results", "close_runs", "--value", "50"], ["player-match", "Ishan Kishan", "1"],
+                 ["milestone", "runs", "10"]):
+        blocks = queries.run(argv, db=db)
+        json.dumps(blocks)
+    rows, _ = table(["results", "close_runs", "--value", "50"], db)
+    assert rows[0]["date"] == "2025-03-23"                          # SRH beat RR by 44 runs
+    assert queries.run(["results", "close_runs", "--value", "50", "--stage", "final"], db=db)[-1]["text"].startswith(
+        "0 matches in finals")                                      # a league match is not a final
+    scored, title = table(["results", "scored_over", "--value", "250", "--innings", "1"], db)
+    assert "batting first" in title and scored == [{"team": "SRH", "times": 1, "won_match": 1, "highest": 286}]
+    conceded, title = table(["results", "conceded_over", "--value", "200", "--innings", "2"], db)
+    assert "bowling second" in title and conceded[0]["team"] == "SRH" and conceded[0]["won_match"] == 1
+    assert table(["results", "defended_under", "--value", "121"], db)[1].startswith("First-innings totals of 120 or less")
+
+
+def test_grounding_adds_stage_and_makes_or_less_inclusive():
+    q = "which team has defended 120 or lesser the most times in IPL finals?"
+    kept, _ = stats.ground_calls([{"name": "match_results", "args": {"kind": "defended_under", "value": 120}}], q,
+                                 resolve_entities(q))
+    assert kept[0]["args"]["value"] == 121 and kept[0]["args"]["stage"] == "final"
+    q = "most runs needed in the final 4 overs of a won chase"            # "final 4 overs" is not the final
+    kept, _ = stats.ground_calls([{"name": "match_results", "args": {"kind": "needed_at_over", "stage": "final"}}], q,
+                                 resolve_entities(q))
+    assert "stage" not in kept[0]["args"] and kept[0]["args"]["over"] == 17
+    q = "which team has conceded 200 or more the most times while bowling first?"   # a planner put 200 in `over`
+    kept, _ = stats.ground_calls([{"name": "match_results", "args": {"kind": "conceded_over", "over": 200}}], q,
+                                 resolve_entities(q))
+    assert kept[0]["args"] == {"kind": "conceded_over", "value": 200, "innings": 1}
+    assert stats.is_aggregate("in how many finals was the winning margin less than 10 runs?")
+    argv = stats.to_argv({"name": "match_results", "args": {"kind": "close_runs", "value": 10, "stage": "final"}})
+    assert argv[argv.index("--stage") + 1] == "final"
 
 
 def test_milestones_take_every_value_and_years_ignore_run_counts():

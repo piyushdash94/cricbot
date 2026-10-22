@@ -84,9 +84,12 @@ TOOLS: list[dict[str, Any]] = [
             "innings": {"type": "integer", "enum": [1, 2]}, "role": {"type": "string", "enum": ["bat", "bowl"]},
             "sort": {"type": "string", "enum": ["sr", "runs", "econ", "wkts"]}, "year": YEAR_PARAM}, ["from_over", "role"]),
     _fn("match_results", "Facts across all matches: close wins (close_runs, close_wickets), targets defended "
-        "(defended_under) or chased (chased_over), runs still needed at an over in won chases (needed_at_over).", {
-            "kind": {"type": "string", "enum": ["close_runs", "close_wickets", "defended_under", "chased_over", "needed_at_over", "tied"]},
-            "value": {"type": "integer"}, "over": {"type": "integer"}, "year": YEAR_PARAM}, ["kind"]),
+        "(defended_under: totals below value), chased (chased_over), runs still needed at an over in won chases "
+        "(needed_at_over), ties, and innings totals of value+ by team (scored_over / conceded_over; innings 1 = "
+        "batting or bowling first). stage limits to finals or playoffs.", {
+            "kind": {"type": "string", "enum": ["close_runs", "close_wickets", "defended_under", "chased_over", "needed_at_over", "tied", "scored_over", "conceded_over"]},
+            "value": {"type": "integer"}, "over": {"type": "integer"}, "innings": {"type": "integer", "enum": [1, 2]},
+            "stage": {"type": "string", "enum": ["final", "playoff"]}, "year": YEAR_PARAM}, ["kind"]),
     _fn("milestones", "Fewest innings (or balls) to reach N runs or wickets.", {
             "stat": {"type": "string", "enum": ["runs", "wickets"]}, "value": {"type": "integer"},
             "by": {"type": "string", "enum": ["innings", "balls"]}}, ["stat", "value"]),
@@ -436,12 +439,17 @@ def to_argv(call: dict[str, Any], index: PlayerIndex | None = None) -> list[str]
                 *(["--innings", str(innings)] if innings else []), *_year(args), "--min-balls", str(balls), "--limit", "10"]
     if name == "match_results":
         kind = args.get("kind")
-        if kind not in ("close_runs", "close_wickets", "defended_under", "chased_over", "needed_at_over", "tied"):
-            raise PlanError("kind must be close_runs, close_wickets, defended_under, chased_over, needed_at_over or tied")
-        value = _int(args, "value", 0, 400) or {"close_runs": 5, "close_wickets": 2, "defended_under": 130,
-                                                  "chased_over": 200, "needed_at_over": 0, "tied": 0}[kind]
+        defaults = {"close_runs": 5, "close_wickets": 2, "defended_under": 130, "chased_over": 200,
+                    "needed_at_over": 0, "tied": 0, "scored_over": 200, "conceded_over": 200}
+        if kind not in defaults:
+            raise PlanError("kind must be one of " + ", ".join(defaults))
+        value = _int(args, "value", 0, 400) or defaults[kind]
         over = _int(args, "over", 2, 20)
-        return ["results", kind, "--value", str(value), *(["--over", str(over)] if over else []), *_year(args), "--limit", "10"]
+        innings = args.get("innings") if args.get("innings") in (1, 2) and kind in ("scored_over", "conceded_over") else None
+        stage = args.get("stage") if args.get("stage") in ("final", "playoff") else None
+        return ["results", kind, "--value", str(value), *(["--over", str(over)] if over else []),
+                *(["--innings", str(innings)] if innings else []), *(["--stage", stage] if stage else []),
+                *_year(args), "--limit", "10"]
     if name == "milestones":
         stat = args.get("stat") if args.get("stat") in ("runs", "wickets") else "runs"
         value = _int(args, "value", 1, 20000)
@@ -574,7 +582,7 @@ UNSUPPORTED = [
 OVER_RANGE = re.compile(r"\bovers?\s*(\d{1,2})\s*(?:-|to|and|–)\s*(\d{1,2})\b|\b(\d{1,2})(?:st|nd|rd|th)\s+over\b"
                         r"|\b(first|last|final)\s+over\b")
 INNINGS = re.compile(r"\b(second|2nd|first|1st)\s+innings\b|\bchas(e|es|ing)\b|\bbatting (first|second)\b|\bdefend")
-AGGREGATE = re.compile(r"\bhow many (matches|times|games|teams|players|seasons)\b"
+AGGREGATE = re.compile(r"\bhow many (matches|times|games|teams|players|seasons|finals|playoffs|knockouts|ties)\b"
                        r"|\bwhich (team|teams|player|players|bowler|batter|side)\b"
                        r"|\b(most|least|fewest|highest|lowest|record|ever|all[- ]time)\b|\bipl history\b|\bin (the )?ipl\b")
 
@@ -612,6 +620,24 @@ def top_tie(results: list[dict[str, Any]]) -> list[str]:
 def mentions_tie(reply: str, results: list[dict[str, Any]]) -> bool:
     """False when the table has a tie at the top and the reply crowns one name."""
     return not top_tie(results) or bool(re.search(r"\b(tie|tied|share|shared|joint|level|equal)\b", reply, re.I))
+
+
+def _innings_of(text: str) -> dict[str, int]:
+    """'bowling first' / 'batting first' -> innings 1; 'bowling second' / 'chasing' -> innings 2."""
+    if re.search(r"\b(batting|bowling|fielding) first\b|\bfirst innings\b|\b1st innings\b", text):
+        return {"innings": 1}
+    if re.search(r"\b(batting|bowling|fielding) second\b|\bsecond innings\b|\b2nd innings\b|\bchasing\b", text):
+        return {"innings": 2}
+    return {}
+
+
+STAGE_FINAL = re.compile(r"(?<!semi-)(?<!semi )(?<!qualifying )(?<!elimination )\b(?:ipl )?finals?\b(?!\s+(?:\w+\s+)?overs?\b)")
+STAGE_PLAYOFF = re.compile(r"\b(play-?offs?|knock-?outs?|qualifiers?|eliminators?|semi-?finals?)\b")
+
+
+def _stage_of(text: str) -> dict[str, str]:
+    """'in finals' -> stage final; 'playoffs', 'knockouts', 'qualifiers' -> stage playoff."""
+    return {"stage": "final"} if STAGE_FINAL.search(text) else {"stage": "playoff"} if STAGE_PLAYOFF.search(text) else {}
 
 
 def is_aggregate(question: str) -> bool:
@@ -1021,12 +1047,28 @@ def ground_calls(calls: list[dict[str, Any]], question: str, entities: dict[str,
             dropped.append(f"{call['name']}({', '.join(missing)})")
             continue
         if args.get("innings") and not re.search(r"\b(second|2nd|first|1st)\s+innings\b|\bchas|\bbatting (first|second)\b"
-                                                 r"|\bdefend|\btarget", question.casefold()):
+                                                 r"|\b(bowling|fielding) (first|second)\b|\bdefend|\btarget", question.casefold()):
             args.pop("innings")                       # "the 1st over of the innings" is not "the first innings"
         last = re.search(r"\b(?:last|final)\s+(\d|two|three|four|five|six)\s+overs\b", question.casefold())
         if last and call["name"] == "match_results" and args.get("kind") == "needed_at_over":
             k = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6}.get(last.group(1)) or int(last.group(1))
             args["over"] = 21 - k                     # "last 4 overs" starts at over 17, whatever the planner said
+        if call["name"] == "match_results":
+            low = question.casefold()
+            args.pop("stage", None)
+            args.update(_stage_of(low))               # "in how many finals..." must not count every match
+            if args.get("kind") != "needed_at_over":
+                args.pop("over", None)                # only needed_at_over takes an over
+            if args.get("kind") in ("scored_over", "conceded_over", "chased_over"):
+                total = re.search(r"\b(?:over|above|more than|at least)\s+(\d{3})\b|\b(\d{3})\s*(?:or more|plus|\+)", low)
+                if total:
+                    args["value"] = int(total.group(1) or total.group(2))   # "200 or more", wherever the planner put it
+                if args["kind"] != "chased_over":
+                    args.pop("innings", None)
+                    args.update(_innings_of(low))     # "while bowling first" is innings 1
+            upto = re.search(r"\b(\d{2,3})\s+or\s+(?:less|lesser|lower|fewer|below|under)\b", low)
+            if upto and args.get("kind") == "defended_under" and int(args.get("value") or 0) == int(upto.group(1)):
+                args["value"] = int(upto.group(1)) + 1   # "120 or less" includes 120
         year = str(args.get("year") or "").strip()
         if not year and years and call["name"] in YEAR_TOOLS:
             args["year"] = _year_arg(years)["year"]          # the planner dropped the question's year
@@ -1167,19 +1209,29 @@ def rule_plan(question: str, entities: dict[str, Any], index: PlayerIndex | None
         g = margin.groups()
         value, unit = (int(g[0]), g[1]) if g[0] else (int(g[2]), g[3]) if g[2] else (int(g[4]) + 1, g[5])
         return [{"name": "match_results", "args": {"kind": "close_runs" if unit.startswith("run") else "close_wickets",
-                                                   "value": value, **year}}]
+                                                   "value": value, **year, **_stage_of(text)}}]
     target = re.search(r"\b(?:under|below|less than)\s+(\d{2,3})\b", text)
-    if target and _has(text, "defend", "defended", "defending"):
-        return [{"name": "match_results", "args": {"kind": "defended_under", "value": int(target.group(1)), **year}}]
+    upto = re.search(r"\b(\d{2,3})\s+or\s+(?:less|lesser|lower|fewer|below|under)\b", text)
+    if (target or upto) and _has(text, "defend", "defended", "defending"):
+        value = int(target.group(1)) if target else int(upto.group(1)) + 1     # "120 or less" = under 121
+        return [{"name": "match_results", "args": {"kind": "defended_under", "value": value, **year, **_stage_of(text)}}]
+    total = re.search(r"\b(?:over|above|more than|at least)\s+(\d{3})\b|\b(\d{3})\s*(?:or more|plus|\+)", text)
+    if total and _has(text, "conceded", "concede", "conceding", "leaked") and not _has(text, "chased", "chase"):
+        return [{"name": "match_results", "args": {"kind": "conceded_over", "value": int(total.group(1) or total.group(2)),
+                                                   **_innings_of(text), **year, **_stage_of(text)}}]
+    if total and _has(text, "scored", "score", "posted", "made", "totals", "totalled") and _has(text, "team", "teams", "times") \
+            and not _has(text, "chased", "chase", "player", "batter", "batsman"):
+        return [{"name": "match_results", "args": {"kind": "scored_over", "value": int(total.group(1) or total.group(2)),
+                                                   **_innings_of(text), **year, **_stage_of(text)}}]
     last = re.search(r"\b(?:last|final)\s+(\d|three|four|five)\s+overs\b", text)
-    if last and _has(text, "chase", "chased", "chasing", "required", "needed"):
+    if last and _has(text, "chase", "chased", "chasing", "chases", "required", "needed", "need"):
         k = {"three": 3, "four": 4, "five": 5}.get(last.group(1)) or int(last.group(1))
-        return [{"name": "match_results", "args": {"kind": "needed_at_over", "over": 21 - k, **year}}]
+        return [{"name": "match_results", "args": {"kind": "needed_at_over", "over": 21 - k, **year, **_stage_of(text)}}]
     chased = re.search(r"\b(?:over|above|more than|at least)\s+(\d{3})\b|\b(\d{3})\s*(?:or more|plus|\+)", text)
     if chased and _has(text, "chased", "chase", "chasing"):
-        return [{"name": "match_results", "args": {"kind": "chased_over", "value": int(chased.group(1) or chased.group(2)), **year}}]
+        return [{"name": "match_results", "args": {"kind": "chased_over", "value": int(chased.group(1) or chased.group(2)), **year, **_stage_of(text)}}]
     if _has(text, "tied", "tie", "ties", "super over", "super overs") and _has(text, "how many", "matches", "games", "times"):
-        return [{"name": "match_results", "args": {"kind": "tied", **year}}]
+        return [{"name": "match_results", "args": {"kind": "tied", **year, **_stage_of(text)}}]
     # Any over range or one innings: "overs 12-20 in the second innings", "the 1st over".
     rng = OVER_RANGE.search(question.casefold())
     if rng and not players and (leader or _has(text, "strike rate", "economy", "wickets", "runs")):
