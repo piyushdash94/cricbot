@@ -197,7 +197,7 @@ def agent_chat_stream(request: AgentChatRequest):
             history=[item.model_dump() for item in request.history],
             ui_context=request.ui_context,
         ):
-            yield json.dumps(event, ensure_ascii=False) + "\n"
+            yield json.dumps(event, ensure_ascii=False, default=str) + "\n"
 
     return StreamingResponse(events(), media_type="application/x-ndjson")
 

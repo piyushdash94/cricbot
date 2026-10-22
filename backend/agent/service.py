@@ -44,6 +44,9 @@ Rules:
 - State facts as facts: never refer to the tables themselves ("the table shows", "as shown in").
 - Write every number as digits ("5 times", not "five times"), so each one can be checked.
 - If several players or teams share the top value, say they are tied and name them all.
+- If a "Definition:" note is given, state the definition in one short clause (it is what "best" was taken to mean).
+- A "(shrunk)" column is the sample-adjusted value used for ranking: name the raw value too. An "index" column: 100 is
+  the league average for the same balls that season; quote the index itself, do not turn it into a percentage.
 - At most five sentences. Plain text, no markdown tables or headings."""
 
 
@@ -452,9 +455,13 @@ class CricbotAgent:
             state["query"],
         ) and self._names_are_grounded(candidate, state["compact_results"], state["query"]) \
             and stats.mentions_tie(candidate, state.get("stats_results") or []) \
+            and stats.crowns_top(candidate, state.get("stats_results") or []) \
             and not self._is_non_answer(candidate, state) \
             and self._result_is_consistent(candidate, state.get("cards") or [])
         reply = self._limit_sentences(candidate) if grounded else self._grounded_fallback(state)
+        definition = next((r["definition"] for r in state.get("stats_results") or [] if r.get("definition")), None)
+        if definition and grounded and not stats.states_definition(reply, definition):
+            reply = definition.split(". ")[0].rstrip(".") + ". " + reply     # say what "best" was taken to mean
         gaps = state.get("gaps") or []
         if gaps and state.get("route") == "stats" and not re.search(r"can.?t|cannot|not (yet|broken|available)|doesn.?t|closest", reply, re.I):
             reply = stats.gap_reply(gaps, True) + reply          # never present a nearby answer as the answer

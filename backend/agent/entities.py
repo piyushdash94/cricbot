@@ -129,6 +129,19 @@ def _temporal_entities(text: str, current_year: int) -> tuple[list[int], str | N
                 years.append(resolved_year)
             corrections.append({"from": matched, "to": str(resolved_year), "type": "temporal"})
             break
+    # Open ranges: "since 2020", "2018 onwards", "after 2015", "before 2014", "in the last 3 seasons".
+    closed = re.search(r"\b20\d{2}\s*(?:to|until|till|through|-|–|and)\s*20\d{2}\b", text)   # "from 2008 to 2025" is closed
+    if closed:
+        pass
+    elif (m := re.search(r"\b(?:since|from)\s+(20\d{2})\b|\b(20\d{2})\s+onwards?\b|\b(?:after|post)\s+(20\d{2})\b", text)):
+        start = int(m.group(1) or m.group(2) or int(m.group(3)) + 1)
+        years = sorted({y for y in years if y >= start} | set(range(max(2008, start), current_year + 1)), reverse=True)
+    elif (m := re.search(r"\b(?:before|pre|until|till|up to)\s+(20\d{2})\b", text)):
+        end = int(m.group(1)) - (0 if re.search(r"\b(?:until|till|up to)\b", m.group(0)) else 1)
+        years = sorted({y for y in years if y <= end} | set(range(2008, min(end, current_year) + 1)), reverse=True)
+    elif (m := re.search(r"\b(?:last|past|previous)\s+(\d|two|three|four|five)\s+(?:seasons|years|editions)\b", text)):
+        k = {"two": 2, "three": 3, "four": 4, "five": 5}.get(m.group(1)) or int(m.group(1))
+        years = sorted(set(years) | set(range(current_year - k + 1, current_year + 1)), reverse=True)
     return sorted(set(years), reverse=True), reference, corrections
 
 

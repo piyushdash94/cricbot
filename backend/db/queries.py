@@ -36,6 +36,8 @@ Views available to `sql`:
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
+from decimal import Decimal
 from functools import lru_cache
 import csv
 import sys
@@ -378,48 +380,65 @@ NO_DL = r"NOT regexp_matches(m.status_text, 'D/?L')"           # rain-revised ta
 def results(q: "Q", a: argparse.Namespace) -> None:
     """Match-level facts across every match: close wins, targets defended or chased, what a chase needed."""
     q.params.update(v=a.value, over=a.over or 17)
+    stage = {"final": "AND regexp_matches(m.title, '^final$', 'i')",
+             "playoff": f"AND {PLAYOFF.replace('title', 'm.title')}"}.get(a.stage or "", "")
+    where = {"final": " in finals", "playoff": " in playoffs"}.get(a.stage or "", "")
     totals = f"""t AS (SELECT match_id, sum(runs_total) FILTER (WHERE inning = 1) AS first,
                         any_value(batting_team) FILTER (WHERE inning = 1) AS bat_first,
                         any_value(batting_team) FILTER (WHERE inning = 2) AS chaser,
                         sum(runs_total) FILTER (WHERE inning = 2 AND over_number < $over) AS before_over
                  FROM d WHERE {YEARS} GROUP BY match_id)"""
     if a.kind == "close_runs":
-        q.table(f"Matches won by fewer than {a.value} runs {q.span} (rain-revised results excluded)", f"""
+        q.table(f"Matches won by fewer than {a.value} runs{where} {q.span} (rain-revised results excluded)", f"""
             SELECT m.start_date AS date, m.title, franchise(m.team1) AS team1, franchise(m.team2) AS team2, m.status_text AS result
-            FROM matches m WHERE year(m.start_date) BETWEEN $y0 AND $y1 AND {NO_DL}
+            FROM matches m WHERE year(m.start_date) BETWEEN $y0 AND $y1 AND {NO_DL} {stage}
               AND TRY_CAST(regexp_extract(m.status_text, 'won by (\\d+) runs?', 1) AS INTEGER) < $v
             ORDER BY m.start_date DESC LIMIT $limit""")
-        n = q.rows(f"""SELECT count(*) AS n FROM matches m WHERE year(m.start_date) BETWEEN $y0 AND $y1 AND {NO_DL}
+        n = q.rows(f"""SELECT count(*) AS n FROM matches m WHERE year(m.start_date) BETWEEN $y0 AND $y1 AND {NO_DL} {stage}
                        AND TRY_CAST(regexp_extract(m.status_text, 'won by (\\d+) runs?', 1) AS INTEGER) < $v""")[0]["n"]
-        q.note(f"{n} matches {q.span} were won by fewer than {a.value} runs (rain-revised results excluded).")
+        q.note(f"{n} matches{where} {q.span} were won by fewer than {a.value} runs (rain-revised results excluded).")
     elif a.kind == "close_wickets":
-        n = q.rows(f"""SELECT count(*) AS n FROM matches m WHERE year(m.start_date) BETWEEN $y0 AND $y1 AND {NO_DL}
+        n = q.rows(f"""SELECT count(*) AS n FROM matches m WHERE year(m.start_date) BETWEEN $y0 AND $y1 AND {NO_DL} {stage}
                        AND TRY_CAST(regexp_extract(m.status_text, 'won by (\\d+) wickets?', 1) AS INTEGER) < $v""")[0]["n"]
-        q.note(f"{n} matches {q.span} were won by fewer than {a.value} wickets (rain-revised results excluded).")
+        q.note(f"{n} matches{where} {q.span} were won by fewer than {a.value} wickets (rain-revised results excluded).")
     elif a.kind == "tied":
-        q.table(f"Tied matches {q.span}", """
+        q.table(f"Tied matches{where} {q.span}", f"""
             SELECT m.start_date AS date, m.title, franchise(m.team1) AS team1, franchise(m.team2) AS team2, m.status_text AS result
-            FROM matches m WHERE year(m.start_date) BETWEEN $y0 AND $y1 AND m.status_text ILIKE '%tied%'
+            FROM matches m WHERE year(m.start_date) BETWEEN $y0 AND $y1 AND m.status_text ILIKE '%tied%' {stage}
             ORDER BY m.start_date DESC LIMIT $limit""")
-        n = q.rows("SELECT count(*) AS n FROM matches m WHERE year(m.start_date) BETWEEN $y0 AND $y1 AND m.status_text ILIKE '%tied%'")[0]["n"]
-        q.note(f"{n} matches {q.span} ended in a tie.")
+        n = q.rows(f"SELECT count(*) AS n FROM matches m WHERE year(m.start_date) BETWEEN $y0 AND $y1 AND m.status_text ILIKE '%tied%' {stage}")[0]["n"]
+        q.note(f"{n} matches{where} {q.span} ended in a tie.")
     elif a.kind in ("defended_under", "chased_over"):
         defended = a.kind == "defended_under"
         cond = "t.first < $v AND franchise(m.winner) = t.bat_first" if defended else "t.first + 1 >= $v AND franchise(m.winner) = t.chaser"
         who = "t.bat_first" if defended else "t.chaser"
-        label = f"Targets under {a.value} defended" if defended else f"Targets of {a.value} or more chased"
+        label = f"First-innings totals of {a.value - 1} or less defended{where}" if defended else f"Targets of {a.value} or more chased{where}"
         q.table(f"{label}, by team {q.span} (rain-revised results excluded)", f"""
             WITH {totals}
             SELECT {who} AS team, count(*) AS times, max(t.first) AS {'highest_defended' if defended else 'highest_target'},
                    min(t.first) AS {'lowest_defended' if defended else 'lowest_target'}
-            FROM t JOIN matches m USING (match_id) WHERE {cond} AND {NO_DL}
+            FROM t JOIN matches m USING (match_id) WHERE {cond} AND {NO_DL} {stage}
             GROUP BY 1 ORDER BY times DESC, team LIMIT $limit""")
     elif a.kind == "needed_at_over":
         q.table(f"Most runs still needed at the start of over {a.over or 17} in chases that were won {q.span} (rain-revised results excluded)", f"""
             WITH {totals}
             SELECT t.chaser AS team, t.first + 1 - coalesce(t.before_over, 0) AS needed, m.start_date AS date, m.status_text AS result
-            FROM t JOIN matches m USING (match_id) WHERE franchise(m.winner) = t.chaser AND {NO_DL}
+            FROM t JOIN matches m USING (match_id) WHERE franchise(m.winner) = t.chaser AND {NO_DL} {stage}
             ORDER BY needed DESC LIMIT $limit""")
+    elif a.kind in ("scored_over", "conceded_over"):
+        side = "bat" if a.kind == "scored_over" else "bowl"
+        inn = {1: " batting first", 2: " batting second"}.get(a.innings, "") if side == "bat" else \
+              {1: " bowling first", 2: " bowling second"}.get(a.innings, "")
+        q.params["inn"] = a.innings or 0
+        q.table(f"Innings totals of {a.value} or more {'scored' if side == 'bat' else 'conceded'}{inn}{where}, by team {q.span}", f"""
+            WITH s AS (SELECT match_id, inning, any_value(batting_team) AS bat, any_value(bowling_team) AS bowl,
+                              sum(runs_total) AS total
+                       FROM d WHERE {YEARS} GROUP BY match_id, inning)
+            SELECT s.{side} AS team, count(*) AS times, count(*) FILTER (WHERE franchise(m.winner) = s.{side}) AS won_match,
+                   max(s.total) AS highest
+            FROM s JOIN matches m USING (match_id)
+            WHERE s.total >= $v AND ($inn = 0 OR s.inning = $inn) {stage}
+            GROUP BY 1 ORDER BY times DESC, team LIMIT $limit""")
     else:
         q.note(f"Unknown kind {a.kind!r}.")
 
@@ -790,12 +809,17 @@ class Q:
             raise NoDatabase(f"No database at {path}. Run `python -m backend.db.cricsheet_load --sync` first, or pass --db.")
         self.con = store.connect(path, read_only=True)
         tables = {r[0] for r in self.con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
-        self.con.execute(FRANCHISE_MACRO + source_views(tables) + VIEWS)
+        from .analytics import STATE_VIEWS
+        self.tables = tables
+        self.con.execute(FRANCHISE_MACRO + source_views(tables) + VIEWS + STATE_VIEWS)
         y0, y1 = parse_years(getattr(a, "year", None))
         self.span = "(all time)" if getattr(a, "year", None) is None else f"({a.year})"
         self.params: dict[str, Any] = {"y0": y0, "y1": y1, "limit": getattr(a, "limit", 15),
                                        "min_balls": getattr(a, "min_balls", 0) or 0}
         self.blocks: list[dict[str, Any]] = []
+
+    def has(self, table: str) -> bool:
+        return table in self.tables
 
     @staticmethod
     def team(code: str | None) -> str:
@@ -815,13 +839,22 @@ class Q:
         cols, data = self._run(sql_text, extra)
         return [dict(zip(cols, r)) for r in data]
 
+    @staticmethod
+    def _plain(v: Any) -> Any:
+        """Make a cell JSON-safe: dates become ISO strings, Decimals floats (the stream encodes plain JSON)."""
+        if isinstance(v, (_dt.date, _dt.datetime, _dt.time)):
+            return v.isoformat()
+        if isinstance(v, Decimal):
+            return float(v)
+        return v
+
     def table(self, title: str, sql_text: str, use_params: bool = True, extra: dict[str, Any] | None = None) -> None:
         cols, data = self._run(sql_text, extra, use_params=use_params)
-        self.blocks.append({"type": "table", "title": title, "columns": cols, "rows": [list(r) for r in data]})
+        self.blocks.append({"type": "table", "title": title, "columns": cols, "rows": [[self._plain(v) for v in r] for r in data]})
 
     def show(self, title: str, records: list[dict[str, Any]]) -> None:
         cols = list(records[0]) if records else []
-        self.blocks.append({"type": "table", "title": title, "columns": cols, "rows": [list(r.values()) for r in records]})
+        self.blocks.append({"type": "table", "title": title, "columns": cols, "rows": [[self._plain(v) for v in r.values()] for r in records]})
 
     def note(self, text: str) -> None:
         self.blocks.append({"type": "text", "text": text})
@@ -922,7 +955,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--role", choices=["bat", "bowl"], default="bat")
     p.add_argument("--sort", choices=["sr", "runs", "econ", "wkts"])
     p = cmd("results", results, "Match facts: close wins, targets defended or chased, runs needed at an over", limit=15)
-    p.add_argument("kind", choices=["close_runs", "close_wickets", "defended_under", "chased_over", "needed_at_over", "tied"])
+    p.add_argument("kind", choices=["close_runs", "close_wickets", "defended_under", "chased_over", "needed_at_over", "tied",
+                                   "scored_over", "conceded_over"])
+    p.add_argument("--stage", choices=["final", "playoff"], help="only finals, or only playoff matches")
+    p.add_argument("--innings", type=int, choices=[1, 2], help="for scored_over/conceded_over: the batting innings")
     p.add_argument("--value", type=int, default=0, help="the run or wicket threshold")
     p.add_argument("--over", type=int, help="for needed_at_over: the over (default 17, i.e. the last 4 overs)")
     p = cmd("milestone", milestone, "Fewest innings (or balls) to N runs or wickets", year=False, limit=10)
@@ -932,6 +968,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = cmd("player-match", player_match, "A player's Nth IPL match and what they did in it", year=False)
     p.add_argument("name")
     p.add_argument("nth", type=int)
+    from .analytics import register
+    register(cmd)
     p = cmd("matches", matches, "List matches (find match ids)", limit=100)
     p.add_argument("--team", help="team code, e.g. RCB")
     p.add_argument("--vs", help="opponent code, e.g. CSK")

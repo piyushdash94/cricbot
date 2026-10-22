@@ -26,6 +26,7 @@ from typing import Any
 from backend.db import queries, store
 
 from .entities import TEAM_ALIASES, _team_entities
+from . import slices
 
 MATCH_ROUTE = "route_to_match"
 YEAR_PATTERN = re.compile(r"^\d{4}(-\d{4})?$")
@@ -84,9 +85,12 @@ TOOLS: list[dict[str, Any]] = [
             "innings": {"type": "integer", "enum": [1, 2]}, "role": {"type": "string", "enum": ["bat", "bowl"]},
             "sort": {"type": "string", "enum": ["sr", "runs", "econ", "wkts"]}, "year": YEAR_PARAM}, ["from_over", "role"]),
     _fn("match_results", "Facts across all matches: close wins (close_runs, close_wickets), targets defended "
-        "(defended_under) or chased (chased_over), runs still needed at an over in won chases (needed_at_over).", {
-            "kind": {"type": "string", "enum": ["close_runs", "close_wickets", "defended_under", "chased_over", "needed_at_over", "tied"]},
-            "value": {"type": "integer"}, "over": {"type": "integer"}, "year": YEAR_PARAM}, ["kind"]),
+        "(defended_under: totals below value), chased (chased_over), runs still needed at an over in won chases "
+        "(needed_at_over), ties, and innings totals of value+ by team (scored_over / conceded_over; innings 1 = "
+        "batting or bowling first). stage limits to finals or playoffs.", {
+            "kind": {"type": "string", "enum": ["close_runs", "close_wickets", "defended_under", "chased_over", "needed_at_over", "tied", "scored_over", "conceded_over"]},
+            "value": {"type": "integer"}, "over": {"type": "integer"}, "innings": {"type": "integer", "enum": [1, 2]},
+            "stage": {"type": "string", "enum": ["final", "playoff"]}, "year": YEAR_PARAM}, ["kind"]),
     _fn("milestones", "Fewest innings (or balls) to reach N runs or wickets.", {
             "stat": {"type": "string", "enum": ["runs", "wickets"]}, "value": {"type": "integer"},
             "by": {"type": "string", "enum": ["innings", "balls"]}}, ["stat", "value"]),
@@ -95,6 +99,7 @@ TOOLS: list[dict[str, Any]] = [
     _fn("season_summary", "Per season: matches, run rate, average first innings, highest total, total sixes.",
         {"year": YEAR_PARAM}),
 ]
+TOOLS += slices.SLICE_TOOLS
 TOOL_NAMES = {tool["function"]["name"] for tool in TOOLS}
 
 # The column a one-line answer leads with, per tool (and sort).
@@ -381,6 +386,8 @@ def _player(name: Any, index: PlayerIndex) -> tuple[str, str]:
 def to_argv(call: dict[str, Any], index: PlayerIndex | None = None) -> list[str]:
     """Validated CLI arguments for one planned call (raises PlanError)."""
     name, args = call["name"], call.get("args") or {}
+    if name in slices.SLICE_TOOL_NAMES:
+        return slices.to_argv(name, args, index)
     if name == "batting_leaders" or name == "bowling_leaders":
         sorts = queries.BAT_SORTS if name == "batting_leaders" else queries.BOWL_SORTS
         sort = str(args.get("sort") or next(iter(sorts)))
@@ -436,12 +443,17 @@ def to_argv(call: dict[str, Any], index: PlayerIndex | None = None) -> list[str]
                 *(["--innings", str(innings)] if innings else []), *_year(args), "--min-balls", str(balls), "--limit", "10"]
     if name == "match_results":
         kind = args.get("kind")
-        if kind not in ("close_runs", "close_wickets", "defended_under", "chased_over", "needed_at_over", "tied"):
-            raise PlanError("kind must be close_runs, close_wickets, defended_under, chased_over, needed_at_over or tied")
-        value = _int(args, "value", 0, 400) or {"close_runs": 5, "close_wickets": 2, "defended_under": 130,
-                                                  "chased_over": 200, "needed_at_over": 0, "tied": 0}[kind]
+        defaults = {"close_runs": 5, "close_wickets": 2, "defended_under": 130, "chased_over": 200,
+                    "needed_at_over": 0, "tied": 0, "scored_over": 200, "conceded_over": 200}
+        if kind not in defaults:
+            raise PlanError("kind must be one of " + ", ".join(defaults))
+        value = _int(args, "value", 0, 400) or defaults[kind]
         over = _int(args, "over", 2, 20)
-        return ["results", kind, "--value", str(value), *(["--over", str(over)] if over else []), *_year(args), "--limit", "10"]
+        innings = args.get("innings") if args.get("innings") in (1, 2) and kind in ("scored_over", "conceded_over") else None
+        stage = args.get("stage") if args.get("stage") in ("final", "playoff") else None
+        return ["results", kind, "--value", str(value), *(["--over", str(over)] if over else []),
+                *(["--innings", str(innings)] if innings else []), *(["--stage", stage] if stage else []),
+                *_year(args), "--limit", "10"]
     if name == "milestones":
         stat = args.get("stat") if args.get("stat") in ("runs", "wickets") else "runs"
         value = _int(args, "value", 1, 20000)
@@ -470,6 +482,8 @@ def run_calls(calls: list[dict[str, Any]], db: str | None = None, index: PlayerI
         try:
             argv = to_argv(call, index)
             blocks = queries.run(argv, db=db or db_path())
+            if call.get("definition"):                 # an evaluative word: say what it was taken to mean
+                blocks = [{"type": "text", "text": f"Definition: {call['definition']}"}, *blocks]
             results.append({**call, "argv": argv, "blocks": blocks, "error": None})
         except PlanError as exc:
             choices = [p.name for p in exc.candidates] if isinstance(exc, AmbiguousName) else []
@@ -564,8 +578,14 @@ def contextualize(question: str, history: list[dict[str, str]] | None, index: Pl
 # Questions the archive cannot answer yet. Each says what is missing, so the reply can say so instead of
 # answering a nearby question ("overs 12-20" is not "the death overs").
 UNSUPPORTED = [
-    (r"hat[- ]?tricks?", "hat-tricks"),
-    (r"(man|player) of the (match|series|tournament)|\bpotm\b|\bmotm\b|\bawards?\b", "awards such as player of the match"),
+    (r"(man|player) of the (series|tournament)|most valuable player|\bmvp\b", "player of the series (only player of the match is recorded)"),
+    (r"\bspin(ners?)?\b|\bspin bowl|\bpacers?\b|\bpace bowl|\bseam(ers?)?\b|\bfast bowlers?\b|\bquicks\b"
+     r"|\b(leg|off|wrist|finger)[- ]?spin|\bleft[- ]arm\b|\bmystery spinner",
+     "bowling type (spin or pace is not in the archive yet)"),
+    (r"\bleft[- ]handed|\bright[- ]handed|\bleft[- ]handers?\b|\bright[- ]handers?\b|\blefties\b",
+     "batting hand (left- or right-handed is not in the archive yet)"),
+    (r"\bat home\b|\bhome (ground|games|matches|venue|record|advantage|win)|\baway (games|matches|from home|record)",
+     "home and away (no home-ground mapping yet)"),
     (r"\bcatch(es)?\b|\bfielders?\b|\bfielding\b|\bstumpings?\b|\brun[- ]outs? by\b",
      "fielding (catches, stumpings and run outs are not loaded yet)"),
     (r"\bwinning (side|team)\b|\bpart of (a |the )?winning\b", "team results in the matches a player played"),
@@ -574,7 +594,7 @@ UNSUPPORTED = [
 OVER_RANGE = re.compile(r"\bovers?\s*(\d{1,2})\s*(?:-|to|and|–)\s*(\d{1,2})\b|\b(\d{1,2})(?:st|nd|rd|th)\s+over\b"
                         r"|\b(first|last|final)\s+over\b")
 INNINGS = re.compile(r"\b(second|2nd|first|1st)\s+innings\b|\bchas(e|es|ing)\b|\bbatting (first|second)\b|\bdefend")
-AGGREGATE = re.compile(r"\bhow many (matches|times|games|teams|players|seasons)\b"
+AGGREGATE = re.compile(r"\bhow many (matches|times|games|teams|players|seasons|finals|playoffs|knockouts|ties)\b"
                        r"|\bwhich (team|teams|player|players|bowler|batter|side)\b"
                        r"|\b(most|least|fewest|highest|lowest|record|ever|all[- ]time)\b|\bipl history\b|\bin (the )?ipl\b")
 
@@ -587,12 +607,13 @@ def capability_gaps(question: str, calls: list[dict[str, Any]]) -> list[str]:
     text = question.casefold()
     gaps = [label for pattern, label in UNSUPPORTED if re.search(pattern, text)]
     names = {c["name"] for c in calls}
-    if OVER_RANGE.search(text) and not names & {"over_range_leaders", "match_results"} \
+    gaps += [g for g in slices.coverage_gaps(question, calls) if g not in gaps]
+    if OVER_RANGE.search(text) and not names & {"over_range_leaders", "match_results", "slice_stats"} \
             and not _phase_in(text.replace("-", " ")):
-        gaps.append("these specific overs")
-    if INNINGS.search(text) and not names & {"over_range_leaders", "match_results"} \
+        gaps += [] if "these specific overs" in gaps else ["these specific overs"]
+    if INNINGS.search(text) and not names & {"over_range_leaders", "match_results", "slice_stats", "partnerships"} \
             and names - {"player_profile", "batter_vs_bowler", "head_to_head", "team_seasons", "champions", "ground_report", "venue_stats"}:
-        gaps.append("one innings (batting first or chasing)")
+        gaps += [] if "one innings (batting first or chasing)" in gaps else ["one innings (batting first or chasing)"]
     return gaps
 
 
@@ -601,7 +622,7 @@ def top_tie(results: list[dict[str, Any]]) -> list[str]:
     for result in results:
         key = _key_column(result)
         block = next((b for b in result.get("blocks", []) if b["type"] == "table" and b["rows"]), None)
-        if not key or not block or key not in block["columns"] or block["columns"][0] not in ("player", "team"):
+        if not key or not block or key not in block["columns"] or block["columns"][0] not in ("player", "team", "batter", "bowler", "pair"):
             continue
         i = block["columns"].index(key)
         tied = [r[0] for r in block["rows"] if r[i] == block["rows"][0][i]]
@@ -609,9 +630,63 @@ def top_tie(results: list[dict[str, Any]]) -> list[str]:
     return []
 
 
+CROWN = re.compile(r"\b(top|tops|leads?|leading|the most|the best|the highest|the lowest|the fewest|number one|no\. ?1)\b", re.I)
+
+
+def crowns_top(reply: str, results: list[dict[str, Any]]) -> bool:
+    """False when the reply's opening sentence crowns a name that is not first (or tied first) in the
+    leaderboard it answers from: every name and number can be in the table while the ranking is wrong."""
+    for result in results:
+        if (result.get("args") or {}).get("split"):
+            return True                                # a comparison, not a ranking
+        block = next((b for b in result.get("blocks", []) if b["type"] == "table" and b["rows"]), None)
+        if not block or block["columns"][0] not in ("player", "team", "batter", "bowler", "pair"):
+            continue
+        first = re.split(r"(?<=[.!?])\s", reply.strip())[0]
+        if not CROWN.search(first):
+            return True
+        names = [str(r[0]) for r in block["rows"]]
+        allowed = set(top_tie([result])) or {names[0]}
+        where = {}
+        for name in names:
+            for key in {name, name.split()[-1]}:
+                m = re.search(rf"(?<![A-Za-z]){re.escape(key)}(?![A-Za-z])", first)
+                if m:
+                    where[name] = min(where.get(name, m.start()), m.start())
+        if not where:
+            return True
+        return min(where, key=where.get) in allowed
+    return True
+
+
+def states_definition(reply: str, definition: str) -> bool:
+    """A definition counts as stated when the numbers in its first sentence appear in the reply."""
+    head = definition.split(". ")[0]
+    numbers = re.findall(r"\d+", head)
+    return all(re.search(rf"(?<!\d){n}(?!\d)", reply) for n in numbers) if numbers else head.casefold() in reply.casefold()
+
+
 def mentions_tie(reply: str, results: list[dict[str, Any]]) -> bool:
     """False when the table has a tie at the top and the reply crowns one name."""
     return not top_tie(results) or bool(re.search(r"\b(tie|tied|share|shared|joint|level|equal)\b", reply, re.I))
+
+
+def _innings_of(text: str) -> dict[str, int]:
+    """'bowling first' / 'batting first' -> innings 1; 'bowling second' / 'chasing' -> innings 2."""
+    if re.search(r"\b(batting|bowling|fielding) first\b|\bfirst innings\b|\b1st innings\b", text):
+        return {"innings": 1}
+    if re.search(r"\b(batting|bowling|fielding) second\b|\bsecond innings\b|\b2nd innings\b|\bchasing\b", text):
+        return {"innings": 2}
+    return {}
+
+
+STAGE_FINAL = re.compile(r"(?<!semi-)(?<!semi )(?<!qualifying )(?<!elimination )\b(?:ipl )?finals?\b(?!\s+(?:\w+\s+)?overs?\b)")
+STAGE_PLAYOFF = re.compile(r"\b(play-?offs?|knock-?outs?|qualifiers?|eliminators?|semi-?finals?)\b")
+
+
+def _stage_of(text: str) -> dict[str, str]:
+    """'in finals' -> stage final; 'playoffs', 'knockouts', 'qualifiers' -> stage playoff."""
+    return {"stage": "final"} if STAGE_FINAL.search(text) else {"stage": "playoff"} if STAGE_PLAYOFF.search(text) else {}
 
 
 def is_aggregate(question: str) -> bool:
@@ -715,7 +790,7 @@ def _key_column(result: dict[str, Any]) -> str | None:
         return args.get("sort") or ("econ" if args.get("role") == "bowl" else "sr")
     if result["name"] == "champions":
         return "champion"
-    return None
+    return slices.key_column(result)
 
 
 LABELS = {"6s": "sixes", "4s": "fours", "sr": "strike rate", "econ": "economy", "avg": "average", "wkts": "wickets",
@@ -777,15 +852,18 @@ def summary(results: list[dict[str, Any]], question: str = "") -> str:
         column = {"sixes": "6s", "fours": "4s"}.get(asked or "", asked) if asked and asked not in cols else asked
         return column if column in cols else None
     parts = []
+    defined = next((r["definition"] for r in results if r.get("definition")), None)
+    if defined:
+        parts.append(defined)                          # an evaluative word: say what it was taken to mean
     for result in results[:3]:
-        notes = [b["text"] for b in result["blocks"] if b["type"] == "text"]
+        notes = [b["text"] for b in result["blocks"] if b["type"] == "text" and not b["text"].startswith("Definition: ")]
         block = _pick_block(result["blocks"], question)
         if block is None:
             parts.extend(notes[:1])
             continue
         rows, cols = block["rows"], block["columns"]
         if not rows:
-            parts.append(f"{block['title']}: no rows.")
+            parts.append(notes[-1] if result["name"] == "hattricks" and notes else f"{block['title']}: no rows.")
             continue
         if result["name"] == "player_match" and block and block["rows"]:
             row = dict(zip(block["columns"], block["rows"][0]))
@@ -800,6 +878,21 @@ def summary(results: list[dict[str, Any]], question: str = "") -> str:
         if result["name"] == "player_profile" and _has(text, "teams", "franchise", "franchises", "played for") \
                 and any("played for" in n for n in notes):
             parts.append(next(n for n in notes if "played for" in n))
+            continue
+        if result["name"] == "hattricks" and notes:
+            parts.append(notes[-1])
+            continue
+        if result["name"] == "slice_stats" and len(cols) > 1 and cols[1] == (result.get("args") or {}).get("split"):
+            key = _key_column(result)
+            column = key if key in cols else cols[2]
+            pick = rows if len(rows) <= 6 else [rows[0], *sorted(rows, key=lambda r: r[cols.index(column)] or 0)[:: len(rows) - 1], rows[-1]]
+            seen, shown = set(), []
+            for r in pick:                                   # a long trend: first, lowest, highest, last
+                if id(r) not in seen:
+                    seen.add(id(r))
+                    shown.append(r)
+            parts.append(f"{block['title']}: " + "; ".join(
+                f"{r[0]} {r[1]} — {_label(column)} {r[cols.index(column)]}" for r in shown) + ".")
             continue
         if result["name"] == "ground_report" and notes:
             parts.append(notes[-1])
@@ -893,6 +986,7 @@ Orange Cap = batting_leaders sort runs; Purple Cap = bowling_leaders sort wkts; 
 first six overs = powerplay, overs 16-20 = death (phase_leaders; "who bowled best" -> role=bowl). Keep the question's year.
 Other over ranges or one innings -> over_range_leaders (overs 12-20 chasing -> from_over=12, to_over=20, innings=2).
 fastest to 2000 runs -> milestones | Rohit's 100th match -> player_match | won by under 5 runs -> match_results.
+{slices.PLANNER_HINTS}
 If no tool answers exactly, call none: never substitute a different question."""
 
 
@@ -932,6 +1026,10 @@ def plan(question: str, entities: dict[str, Any], router: Any = None, history: l
         if rule_calls and prefer_rules(calls, rule_calls):
             planner = "rules" if not calls else f"rules (over {planner})"
             calls = rule_calls
+    calls, uncovered = slices.enforce_coverage(calls, question)
+    if any(c.get("converted_from") for c in calls):
+        note = (note + " " if note else "") + "Rewrote " + ", ".join(sorted({c["converted_from"] for c in calls if c.get(
+            "converted_from")})) + " as a slice so every filter in the question is applied."
     return orient_matchups(calls, question, index), planner, note
 
 
@@ -998,6 +1096,8 @@ def ground_calls(calls: list[dict[str, Any]], question: str, entities: dict[str,
                                           if h.get("role") != "assistant")]))
     words = set(context.split())
     named = {p.player_id for p in index.scan(context)[0]} if index else set()
+    named_teams = set(entities.get("teams") or []) | set(_teams(" ".join(
+        [question, *(str(h.get("content", "")) for h in (history or [])[-4:] if h.get("role") != "assistant")]).casefold()))
     years = sorted(entities.get("years") or [])
     kept, dropped = [], []
     for call in calls:
@@ -1017,16 +1117,49 @@ def ground_calls(calls: list[dict[str, Any]], question: str, entities: dict[str,
                     args[key] = tokens[-1]
             elif not (player and player.player_id in named):   # "Rohit's runs" names Rohit Sharma by first name
                 missing.append(str(args[key]))
+        if call["name"] in ("slice_stats", "awards"):
+            names = args.get("player") or []
+            names = [names] if isinstance(names, str) else list(names)
+            names += [args["vs"]] if args.get("vs") else []
+            for value in names:
+                tokens = _norm(str(value)).split()
+                player = index.lookup(str(value))[0] if index else None
+                if not (tokens and tokens[-1] in words) and not (player and player.player_id in named):
+                    missing.append(str(value))
         if missing:
             dropped.append(f"{call['name']}({', '.join(missing)})")
             continue
+        for key in ("team", "opp"):                   # a team the question (or the recent conversation) never names
+            if args.get(key):
+                try:
+                    code = _team(args[key])
+                except PlanError:
+                    code = None
+                if code not in named_teams:
+                    args.pop(key)
         if args.get("innings") and not re.search(r"\b(second|2nd|first|1st)\s+innings\b|\bchas|\bbatting (first|second)\b"
-                                                 r"|\bdefend|\btarget", question.casefold()):
+                                                 r"|\b(bowling|fielding) (first|second)\b|\bdefend|\btarget", question.casefold()):
             args.pop("innings")                       # "the 1st over of the innings" is not "the first innings"
         last = re.search(r"\b(?:last|final)\s+(\d|two|three|four|five|six)\s+overs\b", question.casefold())
         if last and call["name"] == "match_results" and args.get("kind") == "needed_at_over":
             k = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6}.get(last.group(1)) or int(last.group(1))
             args["over"] = 21 - k                     # "last 4 overs" starts at over 17, whatever the planner said
+        if call["name"] == "match_results":
+            low = question.casefold()
+            args.pop("stage", None)
+            args.update(_stage_of(low))               # "in how many finals..." must not count every match
+            if args.get("kind") != "needed_at_over":
+                args.pop("over", None)                # only needed_at_over takes an over
+            if args.get("kind") in ("scored_over", "conceded_over", "chased_over"):
+                total = re.search(r"\b(?:over|above|more than|at least)\s+(\d{3})\b|\b(\d{3})\s*(?:or more|plus|\+)", low)
+                if total:
+                    args["value"] = int(total.group(1) or total.group(2))   # "200 or more", wherever the planner put it
+                if args["kind"] != "chased_over":
+                    args.pop("innings", None)
+                    args.update(_innings_of(low))     # "while bowling first" is innings 1
+            upto = re.search(r"\b(\d{2,3})\s+or\s+(?:less|lesser|lower|fewer|below|under)\b", low)
+            if upto and args.get("kind") == "defended_under" and int(args.get("value") or 0) == int(upto.group(1)):
+                args["value"] = int(upto.group(1)) + 1   # "120 or less" includes 120
         year = str(args.get("year") or "").strip()
         if not year and years and call["name"] in YEAR_TOOLS:
             args["year"] = _year_arg(years)["year"]          # the planner dropped the question's year
@@ -1051,7 +1184,7 @@ def prefer_rules(llm_calls: list[dict[str, Any]], rule_calls: list[dict[str, Any
     looked_at = {str(v).casefold() for c in llm_calls if c["name"] in player_tools
                  for k, v in (c.get("args") or {}).items() if k in ("name", "batter", "bowler")}
     surnames = {n.split()[-1] for n in looked_at if n.split()}
-    precise = {"over_range_leaders", "match_results", "milestones", "player_match"}
+    precise = {"over_range_leaders", "match_results", "milestones", "player_match", *slices.SLICE_TOOL_NAMES}
     if rule_calls[0]["name"] in precise and [(c["name"], (c.get("args") or {}).get("kind")) for c in llm_calls] != \
             [(c["name"], (c.get("args") or {}).get("kind")) for c in rule_calls]:
         return True                                   # over numbers, margins and milestones: the explicit rule wins
@@ -1160,6 +1293,17 @@ def rule_plan(question: str, entities: dict[str, Any], index: PlayerIndex | None
     nth = re.search(r"\b(\d{1,3})(?:st|nd|rd|th)\s+(?:ipl\s+)?(?:match|game)\b", text)
     if nth and len(players) == 1:
         return [{"name": "player_match", "args": {"name": players[0].name, "nth": int(nth.group(1))}}]
+    # Hat-tricks, awards, impact subs, partnerships, the toss; then evaluative words with a stated definition.
+    if (family := slices.family_calls(text, teams, players, year)):
+        return family
+    if (defined := slices.definition_calls(text, year, slices._team_roles(text, teams))):
+        return defined
+    # Filters the older tools lack. About players or a player metric, this wins over the match-count rules
+    # below ("best strike rate chasing 200+" is not "how many 200+ chases").
+    sliced = slices.slice_rule(question, players, teams, year)
+    if sliced and (players or _has(text, "strike rate", "average", "economy", "runs scored", "batter", "batters",
+                                   "batsman", "batsmen", "bowler", "bowlers", "run rate", "sixes", "fours", "dot balls")):
+        return sliced
     # Close finishes and targets.
     margin = re.search(r"\b(?:less|fewer)\s+than\s+(\d{1,3})\s+(runs?|wickets?)\b|\b(?:under|below)\s+(\d{1,3})\s+(runs?|wickets?)\b"
                        r"|\bby\s+(\d)\s+(runs?|wickets?)\b", text)
@@ -1167,19 +1311,31 @@ def rule_plan(question: str, entities: dict[str, Any], index: PlayerIndex | None
         g = margin.groups()
         value, unit = (int(g[0]), g[1]) if g[0] else (int(g[2]), g[3]) if g[2] else (int(g[4]) + 1, g[5])
         return [{"name": "match_results", "args": {"kind": "close_runs" if unit.startswith("run") else "close_wickets",
-                                                   "value": value, **year}}]
+                                                   "value": value, **year, **_stage_of(text)}}]
     target = re.search(r"\b(?:under|below|less than)\s+(\d{2,3})\b", text)
-    if target and _has(text, "defend", "defended", "defending"):
-        return [{"name": "match_results", "args": {"kind": "defended_under", "value": int(target.group(1)), **year}}]
+    upto = re.search(r"\b(\d{2,3})\s+or\s+(?:less|lesser|lower|fewer|below|under)\b", text)
+    if (target or upto) and _has(text, "defend", "defended", "defending"):
+        value = int(target.group(1)) if target else int(upto.group(1)) + 1     # "120 or less" = under 121
+        return [{"name": "match_results", "args": {"kind": "defended_under", "value": value, **year, **_stage_of(text)}}]
+    total = re.search(r"\b(?:over|above|more than|at least)\s+(\d{3})\b|\b(\d{3})\s*(?:or more|plus|\+)", text)
+    if total and _has(text, "conceded", "concede", "conceding", "leaked") and not _has(text, "chased", "chase"):
+        return [{"name": "match_results", "args": {"kind": "conceded_over", "value": int(total.group(1) or total.group(2)),
+                                                   **_innings_of(text), **year, **_stage_of(text)}}]
+    if total and _has(text, "scored", "score", "posted", "made", "totals", "totalled") and _has(text, "team", "teams", "times") \
+            and not _has(text, "chased", "chase", "player", "batter", "batsman"):
+        return [{"name": "match_results", "args": {"kind": "scored_over", "value": int(total.group(1) or total.group(2)),
+                                                   **_innings_of(text), **year, **_stage_of(text)}}]
     last = re.search(r"\b(?:last|final)\s+(\d|three|four|five)\s+overs\b", text)
-    if last and _has(text, "chase", "chased", "chasing", "required", "needed"):
+    if last and _has(text, "chase", "chased", "chasing", "chases", "required", "needed", "need"):
         k = {"three": 3, "four": 4, "five": 5}.get(last.group(1)) or int(last.group(1))
-        return [{"name": "match_results", "args": {"kind": "needed_at_over", "over": 21 - k, **year}}]
+        return [{"name": "match_results", "args": {"kind": "needed_at_over", "over": 21 - k, **year, **_stage_of(text)}}]
     chased = re.search(r"\b(?:over|above|more than|at least)\s+(\d{3})\b|\b(\d{3})\s*(?:or more|plus|\+)", text)
     if chased and _has(text, "chased", "chase", "chasing"):
-        return [{"name": "match_results", "args": {"kind": "chased_over", "value": int(chased.group(1) or chased.group(2)), **year}}]
+        return [{"name": "match_results", "args": {"kind": "chased_over", "value": int(chased.group(1) or chased.group(2)), **year, **_stage_of(text)}}]
     if _has(text, "tied", "tie", "ties", "super over", "super overs") and _has(text, "how many", "matches", "games", "times"):
-        return [{"name": "match_results", "args": {"kind": "tied", **year}}]
+        return [{"name": "match_results", "args": {"kind": "tied", **year, **_stage_of(text)}}]
+    if sliced:
+        return sliced
     # Any over range or one innings: "overs 12-20 in the second innings", "the 1st over".
     rng = OVER_RANGE.search(question.casefold())
     if rng and not players and (leader or _has(text, "strike rate", "economy", "wickets", "runs")):

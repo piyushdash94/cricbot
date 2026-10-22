@@ -517,10 +517,53 @@ def test_new_queries_run_on_the_fixture(db):
      {"kind": "needed_at_over", "over": 17}),
     ("who has bowled the least balls to take 100 ipl wickets?", "milestones", {"stat": "wickets", "value": 100, "by": "balls"}),
     ("how many matches have ended in a tie?", "match_results", {"kind": "tied"}),
+    ("in how many finals was the winning margin less than 10 runs?", "match_results",
+     {"kind": "close_runs", "value": 10, "stage": "final"}),
+    ("how many playoff matches were won by fewer than 3 wickets?", "match_results",
+     {"kind": "close_wickets", "value": 3, "stage": "playoff"}),
+    ("which team has defended 120 or lesser the most times in IPL?", "match_results", {"kind": "defended_under", "value": 121}),
+    ("which team has conceded 200 or more the most times while bowling first?", "match_results",
+     {"kind": "conceded_over", "value": 200, "innings": 1}),
+    ("which team scored 200+ batting first the most times?", "match_results", {"kind": "scored_over", "value": 200, "innings": 1}),
 ])
 def test_rule_planner_reaches_the_new_queries(question, tool, args):
     calls = stats.rule_plan(question, resolve_entities(question), None)
     assert calls and calls[0]["name"] == tool and args.items() <= calls[0]["args"].items()
+
+
+def test_query_rows_are_plain_json_and_stage_and_totals_filter(db):
+    # Dates come back as ISO strings: the chat stream encodes events with plain json.dumps.
+    for argv in (["results", "close_runs", "--value", "50"], ["player-match", "Ishan Kishan", "1"],
+                 ["milestone", "runs", "10"]):
+        blocks = queries.run(argv, db=db)
+        json.dumps(blocks)
+    rows, _ = table(["results", "close_runs", "--value", "50"], db)
+    assert rows[0]["date"] == "2025-03-23"                          # SRH beat RR by 44 runs
+    assert queries.run(["results", "close_runs", "--value", "50", "--stage", "final"], db=db)[-1]["text"].startswith(
+        "0 matches in finals")                                      # a league match is not a final
+    scored, title = table(["results", "scored_over", "--value", "250", "--innings", "1"], db)
+    assert "batting first" in title and scored == [{"team": "SRH", "times": 1, "won_match": 1, "highest": 286}]
+    conceded, title = table(["results", "conceded_over", "--value", "200", "--innings", "2"], db)
+    assert "bowling second" in title and conceded[0]["team"] == "SRH" and conceded[0]["won_match"] == 1
+    assert table(["results", "defended_under", "--value", "121"], db)[1].startswith("First-innings totals of 120 or less")
+
+
+def test_grounding_adds_stage_and_makes_or_less_inclusive():
+    q = "which team has defended 120 or lesser the most times in IPL finals?"
+    kept, _ = stats.ground_calls([{"name": "match_results", "args": {"kind": "defended_under", "value": 120}}], q,
+                                 resolve_entities(q))
+    assert kept[0]["args"]["value"] == 121 and kept[0]["args"]["stage"] == "final"
+    q = "most runs needed in the final 4 overs of a won chase"            # "final 4 overs" is not the final
+    kept, _ = stats.ground_calls([{"name": "match_results", "args": {"kind": "needed_at_over", "stage": "final"}}], q,
+                                 resolve_entities(q))
+    assert "stage" not in kept[0]["args"] and kept[0]["args"]["over"] == 17
+    q = "which team has conceded 200 or more the most times while bowling first?"   # a planner put 200 in `over`
+    kept, _ = stats.ground_calls([{"name": "match_results", "args": {"kind": "conceded_over", "over": 200}}], q,
+                                 resolve_entities(q))
+    assert kept[0]["args"] == {"kind": "conceded_over", "value": 200, "innings": 1}
+    assert stats.is_aggregate("in how many finals was the winning margin less than 10 runs?")
+    argv = stats.to_argv({"name": "match_results", "args": {"kind": "close_runs", "value": 10, "stage": "final"}})
+    assert argv[argv.index("--stage") + 1] == "final"
 
 
 def test_milestones_take_every_value_and_years_ignore_run_counts():
@@ -531,7 +574,8 @@ def test_milestones_take_every_value_and_years_ignore_run_counts():
 
 
 def test_gaps_are_named_instead_of_answering_a_nearby_question():
-    assert stats.capability_gaps("who has taken the most hattricks for MI?", []) == ["hat-tricks"]
+    assert stats.capability_gaps("who bowled the fastest ball for MI?", []) == ["ball speed"]
+    assert stats.capability_gaps("who is the best spinner for RCB?", [])[0].startswith("bowling type")
     assert stats.capability_gaps("highest strike rate in overs 12-20", [{"name": "phase_leaders", "args": {}}]) \
         == ["these specific overs"]
     assert stats.capability_gaps("highest strike rate in overs 12-20", [{"name": "over_range_leaders", "args": {}}]) == []
@@ -549,8 +593,8 @@ def test_on_screen_teams_stay_with_questions_about_that_match():
 def test_graph_says_so_when_no_query_covers_a_whole_ipl_question(db):
     from backend.agent.service import CricbotAgent
 
-    result = CricbotAgent(llm=FakeRouter(fail_plan=True)).answer("who has taken the most hat-tricks in the IPL?")
-    assert result["reply"].startswith("I can't answer that yet") and "hat-tricks" in result["reply"]
+    result = CricbotAgent(llm=FakeRouter(fail_plan=True)).answer("who has bowled the fastest ball in the IPL?")
+    assert result["reply"].startswith("I can't answer that yet") and "ball speed" in result["reply"]
     assert result["tool_calls"] == [] and result["cards"][0]["type"] == "scope"
 
 
@@ -601,7 +645,7 @@ def test_precise_rules_win_and_unanswerable_gaps_skip_the_queries(db):
     rules = [{"name": "match_results", "args": {"kind": "needed_at_over", "over": 17}}]
     assert stats.prefer_rules([{"name": "match_results", "args": {"kind": "chased_over", "value": 100}}], rules)
     assert not stats.prefer_rules(rules, rules)
-    result = CricbotAgent(llm=FakeRouter([{"name": "records", "args": {}}])).answer("who has taken the most hat-tricks?")
+    result = CricbotAgent(llm=FakeRouter([{"name": "records", "args": {}}])).answer("who has bowled the fastest delivery?")
     assert result["reply"].startswith("I can't answer that yet") and result["tool_calls"] == []
 
 
@@ -620,3 +664,164 @@ def test_last_n_overs_comes_from_the_question():
     q = "has any team chased more than 100 runs required in the last 4 overs of chase?"
     kept, _ = stats.ground_calls([{"name": "match_results", "args": {"kind": "needed_at_over", "over": 16}}], q, resolve_entities(q))
     assert kept[0]["args"]["over"] == 17
+
+
+# ----------------------------------------------------------------- slices, match facts and coverage
+
+def test_loader_keeps_toss_awards_fielders_and_impact_subs(db):
+    con = __import__("duckdb").connect(db, read_only=True)
+    assert con.execute("SELECT toss_winner, toss_decision FROM cs_match_info").fetchall() == [("RR", "field")]
+    assert con.execute("SELECT player FROM cs_awards").fetchall() == [("Ishan Kishan",)]
+    assert con.execute("SELECT count(*) FROM cs_fielding").fetchone()[0] == 12
+    assert con.execute("SELECT count(*) FROM cs_subs WHERE reason = 'impact_player'").fetchone()[0] == 2
+    con.close()
+
+
+def test_slice_compiler_filters_splits_and_innings_level(db):
+    best, title = table(["slice", "--subject", "batter", "--metric", "high_score"], db)
+    assert best[0]["player"] == "Ishan Kishan" and best[0]["score"] == "106*"            # not out
+    totals, _ = table(["slice", "--subject", "batting_team", "--metric", "high_score", "--innings", "1"], db)
+    assert totals == [{"team": "SRH", "score": "286/6", "balls": 120, "date": "2025-03-23", "match": "Match 2"}]
+    split, title = table(["slice", "--subject", "batter", "--metric", "runs", "--player", "Ishan Kishan", "--split", "innings"], db)
+    assert title.startswith("Ishan Kishan: runs by innings") and split[0]["innings"] == "batting first" and split[0]["runs"] == 106
+    toss, title = table(["slice", "--subject", "bowler", "--metric", "wickets", "--toss", "won", "--min-balls", "0"], db)
+    assert "after winning the toss" in title and toss[0]["bowler"] == "TU Deshpande" and toss[0]["wickets"] == 3   # RR won the toss
+    assert queries.run(["slice", "--subject", "batter", "--metric", "economy"], db=db)[0]["text"].startswith("'economy' is not")
+    chase, title = table(["slice", "--subject", "batter", "--metric", "runs", "--target-min", "250"], db)
+    assert "target 250 or more" in title and {r["batter"] for r in chase} >= {"Dhruv Jurel", "SV Samson"}
+
+
+def test_new_families_on_the_fixture(db):
+    assert table(["awards"], db)[0][0]["player"] == "Ishan Kishan"
+    assert queries.run(["hattricks"], db=db)[-1]["text"].startswith("0 hat-tricks")
+    stands, _ = table(["partnerships", "--limit", "1"], db)
+    assert stands[0]["runs"] == 111 and stands[0]["wicket"] == 4
+    subs, _ = table(["impact"], db)
+    assert {r["player"] for r in subs} == {"A Zampa", "SV Samson"}
+    assert table(["toss"], db)[0][0]["chose_field_pct"] == 100.0
+
+
+@pytest.mark.parametrize("question, expected", [
+    ("Kohli's average in IPL finals", {"stage": "final"}),
+    ("strike rate in the last 4 overs of successful chases", {"overs": "17-20", "innings": 2, "result": "won"}),
+    ("economy after winning the toss at Chepauk", {"toss": "won", "venue": "chepauk"}),
+    ("best strike rate when the required rate is above 12", {"rrr_min": 12.0}),
+    ("runs with 3 or fewer wickets in hand", {"wickets_in_hand": "0-3"}),
+    ("strike rate in the first 10 balls", {"batter_balls": "1-10"}),
+    ("best strike rate chasing 200+", {"target_min": 200, "innings": 2}),
+    ("Kohli chasing vs batting first", {}),                                 # a split compares; it does not filter
+    ("most runs against CSK", {"opp": "CSK"}),
+    ("KKR against MI: who has won more?", {}),                              # a rivalry, not a filter
+])
+def test_parse_filters_reads_the_wording(question, expected):
+    assert stats.slices.parse_filters(question) == expected
+
+
+@pytest.mark.parametrize("question, tool, args", [
+    ("What is Virat Kohli's batting average in IPL finals?", "slice_stats", {"metric": "average", "stage": "final"}),
+    ("Is Virat Kohli better chasing or batting first?", "slice_stats", {"split": "innings", "metric": "average"}),
+    ("how has the death overs run rate changed by season?", "slice_stats", {"subject": "league", "split": "season"}),
+    ("What is the highest individual score in an IPL final?", "slice_stats", {"metric": "high_score", "stage": "final"}),
+    ("which batter was most ahead of his era by strike rate?", "slice_stats", {"adjust": True}),
+    ("who has the best economy in the death overs after winning the toss?", "slice_stats", {"toss": "won", "shrink": True}),
+    ("who has taken the most hat-tricks?", "hattricks", {}),
+    ("who has the most player of the match awards for RCB?", "awards", {"team": "RCB"}),
+    ("does winning the toss help at Chinnaswamy?", "toss_stats", {"venue": "chinnaswamy"}),
+    ("which impact player has scored the most runs?", "impact_subs", {"sort": "runs"}),
+    ("best opening pairs in IPL history", "partnerships", {"wicket": 1, "by": "pair"}),
+    ("KKR against MI: who has won more?", "head_to_head", {}),
+])
+def test_rule_planner_reaches_slices_and_families(question, tool, args):
+    index = stats.PlayerIndex([stats.Player(253802, "Virat Kohli", 300), stats.Player(625383, "Jasprit Bumrah", 150)])
+    for p in index.players:
+        for key in stats._name_keys(p.name):
+            index.keys.setdefault(key, []).append(p)
+    calls = stats.rule_plan(question, resolve_entities(question), index)
+    assert calls and calls[0]["name"] == tool and args.items() <= calls[0]["args"].items()
+
+
+def test_definitions_are_stated():
+    q = "who are the best finishers in the IPL?"
+    calls = stats.rule_plan(q, resolve_entities(q), None)
+    assert [c["args"]["metric"] for c in calls] == ["strike_rate", "average"] and calls[0]["definition"].startswith("Finisher =")
+    results = [{**calls[0], "blocks": [{"type": "table", "title": "t", "columns": ["batter", "strike rate (shrunk)"],
+                                       "rows": [["AB de Villiers", 202.7]]}]}]
+    assert stats.summary(results, q).startswith("Finisher =")
+
+
+def test_coverage_guard_repairs_or_names_the_gap():
+    # A leaderboard cannot filter to finals: it becomes a slice that can.
+    calls, gaps = stats.slices.enforce_coverage([{"name": "batting_leaders", "args": {"sort": "runs"}}], "most runs in IPL finals")
+    assert calls[0]["name"] == "slice_stats" and calls[0]["args"]["stage"] == "final" and not gaps
+    # A matchup in the death overs keeps both players and gains the phase.
+    calls, _ = stats.slices.enforce_coverage([{"name": "batter_vs_bowler", "args": {"batter": "Virat Kohli", "bowler": "Jasprit Bumrah"}}],
+                                             "Kohli against Bumrah in the death overs")
+    assert {"player": ["Virat Kohli"], "vs": "Jasprit Bumrah", "phase": "death"}.items() <= calls[0]["args"].items()
+    # The tool's default metric gives way to the one the question names.
+    calls, _ = stats.slices.enforce_coverage([{"name": "phase_leaders", "args": {"phase": "powerplay", "role": "bat"}}],
+                                             "who has hit the most sixes in the powerplay while chasing?")
+    assert calls[0]["args"]["metric"] == "sixes" and calls[0]["args"]["innings"] == 2
+    # A slice the planner under-filled gets the filter added.
+    calls, _ = stats.slices.enforce_coverage([{"name": "slice_stats", "args": {"subject": "batter", "metric": "runs"}}],
+                                             "most runs in playoffs")
+    assert calls[0]["args"]["stage"] == "playoff"
+    # A tool with no slice equivalent keeps its call and names the filter it cannot apply.
+    calls, gaps = stats.slices.enforce_coverage([{"name": "milestones", "args": {"stat": "runs", "value": 1000}}],
+                                                "fastest to 1000 runs in finals")
+    assert calls[0]["name"] == "milestones" and gaps == ["finals or playoffs only"]
+
+
+def test_open_year_ranges():
+    years = lambda q: sorted(resolve_entities(q, current_year=2026)["years"])      # noqa: E731
+    assert years("most runs since 2023") == [2023, 2024, 2025, 2026]
+    assert years("most runs before 2012") == [2008, 2009, 2010, 2011]
+    assert years("most runs from 2008 to 2025") == [2008, 2025]               # a closed range stays closed
+    assert years("runs in the last 3 seasons") == [2024, 2025, 2026]
+
+
+def test_slice_argv_validates():
+    argv = stats.to_argv({"name": "slice_stats", "args": {"subject": "bowler", "metric": "average", "overs": "16-20",
+                                                         "venue": "Chepauk", "split": "season"}})
+    assert argv[:5] == ["slice", "--subject", "bowler", "--metric", "bowling_average"]   # a bowler's average
+    assert "Chidambaram" in argv and argv[-1] == "25"                                    # nickname; a trend gets every season
+    with pytest.raises(stats.PlanError):
+        stats.to_argv({"name": "slice_stats", "args": {"subject": "batter", "metric": "economy"}})
+    with pytest.raises(stats.PlanError):
+        stats.to_argv({"name": "slice_stats", "args": {"subject": "batter", "metric": "runs", "overs": "death"}})
+
+
+def test_grounding_fixes_real_llm_plan_errors():
+    """Plans an LLM actually produced on the slices eval set, and what grounding makes of them."""
+    fix = lambda calls, q: stats.slices.enforce_coverage(calls, q)[0][0]                  # noqa: E731
+    call = fix([{"name": "slice_stats", "args": {"subject": "batter", "metric": "runs", "split": "innings", "stage": "final"}}],
+               "Who has scored the most runs in IPL finals?")
+    assert "split" not in call["args"]                                   # a split nobody asked for
+    call = fix([{"name": "slice_stats", "args": {"subject": "batting_team", "metric": "runs", "innings": 2}}],
+               "What is the highest total made while chasing in the IPL?")
+    assert call["args"]["metric"] == "high_score"                        # one innings, not a sum over all chases
+    call = fix([{"name": "over_range_leaders", "args": {"from_over": 16, "to_over": 20, "role": "bat", "year": "2024"}}],
+               "What was the run rate in the death overs in IPL 2024?")
+    assert call["name"] == "slice_stats" and call["args"]["subject"] == "league" and call["args"]["metric"] == "run_rate"
+    call = fix([{"name": "over_range_leaders", "args": {"from_over": 1, "to_over": 6, "innings": 2, "role": "bat"}}],
+               "Which team has the best powerplay run rate when chasing?")
+    assert call["args"]["subject"] == "batting_team" and call["args"]["innings"] == 2
+    call = fix([{"name": "slice_stats", "args": {"subject": "batter", "metric": "strike_rate", "adjust": "true", "shrink": "true"}}],
+               "Which batter was most ahead of his era by strike rate?")
+    assert call["args"]["adjust"] is True                                # "true" as a string still counts
+    q = "How many hat-tricks has Amit Mishra taken?"
+    kept, _ = stats.ground_calls([{"name": "hattricks", "args": {"team": "MI"}}], q, resolve_entities(q))
+    assert kept[0]["args"] == {}                                         # MI is not in the question
+
+
+def test_reply_must_crown_the_top_row_and_state_the_definition():
+    block = {"type": "table", "title": "t", "columns": ["batter", "strike rate", "strike rate (shrunk)"],
+             "rows": [["AB de Villiers", 215.74, 202.91], ["Ashutosh Sharma", 239.39, 199.17]]}
+    results = [{"name": "slice_stats", "args": {"metric": "strike_rate", "shrink": True}, "blocks": [block]}]
+    wrong = "Ashutosh Sharma is the top finisher with a shrunk strike rate of 199.17. AB de Villiers follows."
+    assert not stats.crowns_top(wrong, results)                       # seen in an LLM run: names right, ranking wrong
+    assert stats.crowns_top("AB de Villiers is the top finisher (202.91), ahead of Ashutosh Sharma.", results)
+    assert stats.crowns_top("De Villiers leads with 202.91.", results)
+    assert stats.crowns_top("Ashutosh Sharma has the highest raw strike rate, 239.39, on 66 balls.", results) is False
+    definition = "Finisher = batting in overs 16-20 of chases that were won. Ranked by strike rate."
+    assert not stats.states_definition("AB de Villiers is the best finisher.", definition)
+    assert stats.states_definition("In overs 16-20 of won chases, AB de Villiers is the best.", definition)
