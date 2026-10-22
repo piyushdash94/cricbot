@@ -744,12 +744,13 @@ def scope_reply(topic: str) -> str:
             f"questions about {topic}. Try an IPL question instead, such as \"most runs in IPL 2024\".")
 
 
-SCOPE_SUGGESTIONS = ["Most runs in IPL 2024", "Who won IPL 2016?", "Kohli against Bumrah", "Average first innings at Wankhede"]
+SCOPE_SUGGESTIONS = ["Most runs in IPL 2024", "Kohli chasing vs batting first", "Who are the best finishers in the IPL?",
+                     "Highest partnership in IPL history"]
 
 
 # ----------------------------------------------------------------- facts and summaries
 
-LEADING = {"player", "team", "ground"}
+LEADING = {"player", "team", "ground", "batter", "bowler", "pair"}
 
 
 def facts_text(results: list[dict[str, Any]], max_rows: int = 10) -> str:
@@ -766,7 +767,8 @@ def facts_text(results: list[dict[str, Any]], max_rows: int = 10) -> str:
                 lines.append("(no rows)")
                 continue
             columns = block["columns"]
-            ranked = bool(columns) and columns[0] in LEADING
+            split = (result.get("args") or {}).get("split")
+            ranked = bool(columns) and columns[0] in LEADING and not (split and split in columns)   # a comparison is not a ranking
             lines.append(("rank | " if ranked else "") + " | ".join(columns))
             limit = max_rows if ranked else 30
             for i, row in enumerate(rows[:limit], 1):

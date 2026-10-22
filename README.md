@@ -119,7 +119,7 @@ An archive built before October 2026 lacks the toss, player-of-the-match, fieldi
 `python -m backend.db.cricsheet_load` once (no download needed; it rebuilds only the Cricsheet tables, ESPN data is kept).
 Until then those questions say the data is not loaded.
 
-It covers season and all-time leaders (any sort, any team), records, powerplay / middle / death splits, player profiles, batter v bowler, venues, a ground report, champions, team seasons and head to head. The same queries run from the command line:
+It covers season and all-time leaders (any sort, any team), records, powerplay / middle / death splits, player profiles, batter v bowler, venues, a ground report, champions, team seasons and head to head. The **Explore** tab builds any slice (who, measure, filters, compare by) with presets such as best finishers, Kohli chasing vs batting first and death-overs run rate by season; **Stands** lists partnerships and pairs; Records adds player-of-the-match awards, hat-tricks and impact substitutes; Grounds adds the toss. The same queries run from the command line:
 
 ```bash
 python -m backend.db.queries top-batters --year 2024 --sort sixes
@@ -201,6 +201,8 @@ Share the HTTPS forwarding URL printed by ngrok. The single frontend tunnel also
 | `GET` | `/api/stats/matchup?batter=...&bowler=...` | Every ball a batter faced from a bowler |
 | `GET` | `/api/stats/h2h`, `/api/stats/teams/{code}`, `/api/stats/champions` | Head to head, team seasons, finals and titles |
 | `GET` | `/api/stats/venues`, `/api/stats/grounds/{name}` | Grounds; one ground against the league |
+| `GET` | `/api/stats/slice` | Any metric on any slice of balls: filters, splits, season-adjusted and sample-adjusted rankings, highest single innings |
+| `GET` | `/api/stats/partnerships`, `/awards`, `/hattricks`, `/impact`, `/toss` | Stands and pairs, player of the match, hat-tricks, impact substitutes, the toss |
 | `GET` | `/api/live` | Fetch live matches through `cricdata` |
 | `GET` | `/api/matches/{series_slug}/{match_slug}` | Fetch the complete live match bundle |
 

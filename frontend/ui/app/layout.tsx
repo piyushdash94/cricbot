@@ -12,13 +12,16 @@ const description = "Search IPL history, open complete match workspaces, explore
 export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();
   const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost:3000";
-  const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
+  // A local address is plain http (127.0.0.1 too, or the icon and preview image resolve to https and fail).
+  const local = /^(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(host);
+  const protocol = requestHeaders.get("x-forwarded-proto") ?? (local ? "http" : "https");
   const origin = `${protocol}://${host}`;
 
   return {
     metadataBase: new URL(origin),
     title,
     description,
+    icons: { icon: "/favicon.svg" },
     openGraph: { title, description, type: "website", images: [{ url: `${origin}/og.png`, width: 1200, height: 630, alt: "Cricbot cricket intelligence dashboard" }] },
     twitter: { card: "summary_large_image", title, description, images: [`${origin}/og.png`] },
   };
