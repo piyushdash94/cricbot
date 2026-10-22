@@ -257,6 +257,9 @@ def player(q: "Q", a: argparse.Namespace) -> None:
         return
     pid, name = resolved
     q.params["pid"] = pid
+    teams = q.rows("""SELECT team, min(year) AS first, max(year) AS last FROM (
+                          SELECT team, year FROM bat_inn WHERE player_id = $pid UNION ALL SELECT team, year FROM bowl_inn WHERE player_id = $pid)
+                      GROUP BY team ORDER BY first""")
     did = q.rows(f"""SELECT (SELECT count(*) FROM bat_inn WHERE player_id = $pid AND {YEARS}) AS bat,
                             (SELECT count(*) FROM bowl_inn WHERE player_id = $pid AND {YEARS}) AS bowl""")[0]
     if not did["bat"] and not did["bowl"]:
@@ -267,6 +270,9 @@ def player(q: "Q", a: argparse.Namespace) -> None:
     for count, show in sorted(sections, key=lambda item: -item[0]):
         if count:
             show(q, name)
+    if teams:
+        q.note(f"{name} played for " + ", ".join(
+            f"{t['team']} ({t['first']}{'' if t['first'] == t['last'] else '-' + str(t['last'])})" for t in teams) + ".")
 
 
 def matchup(q: "Q", a: argparse.Namespace) -> None:
@@ -330,6 +336,145 @@ def phase(q: "Q", a: argparse.Namespace) -> None:
             FROM d WHERE phase = $phase AND {YEARS}
             GROUP BY bowler_id HAVING count(*) FILTER (WHERE is_legal) >= $min_balls
             ORDER BY econ ASC LIMIT $limit""")
+
+
+INNINGS_LABEL = {1: "first innings (batting first)", 2: "second innings (chasing)"}
+
+
+def overs(q: "Q", a: argparse.Namespace) -> None:
+    """Leaders for any over range and innings: "overs 12-20 in the chase", "the 1st over"."""
+    lo, hi = a.from_over, a.to_over or a.from_over
+    if not (1 <= lo <= hi <= 20):
+        q.note("Overs must be between 1 and 20, e.g. --from 12 --to 20.")
+        return
+    q.params.update(lo=lo, hi=hi, inn=a.innings or 0)
+    where = f"over_number BETWEEN $lo AND $hi AND ($inn = 0 OR inning = $inn) AND {YEARS}"
+    span = f"over {lo}" if lo == hi else f"overs {lo}-{hi}"
+    span += f", {INNINGS_LABEL[a.innings]}" if a.innings else ""
+    if a.role == "bat":
+        sort = a.sort if a.sort in ("sr", "runs") else "sr"
+        q.table(f"Batters by {'strike rate' if sort == 'sr' else 'runs'} in {span} {q.span} (min {a.min_balls} balls)", f"""
+            SELECT any_value(batter) AS player, sum(runs_bat) AS runs, count(*) FILTER (WHERE NOT is_wide) AS balls,
+                   round(100.0 * sum(runs_bat) / count(*) FILTER (WHERE NOT is_wide), 2) AS sr,
+                   count(*) FILTER (WHERE is_six) AS "6s", count(*) FILTER (WHERE is_wicket AND player_out_id = batter_id) AS outs
+            FROM d WHERE {where}
+            GROUP BY batter_id HAVING count(*) FILTER (WHERE NOT is_wide) >= $min_balls
+            ORDER BY {sort} DESC, balls DESC LIMIT $limit""")
+    else:
+        sort = a.sort if a.sort in ("econ", "wkts") else "econ"
+        q.table(f"Bowlers by {'economy' if sort == 'econ' else 'wickets'} in {span} {q.span} (min {a.min_balls} balls)", f"""
+            SELECT any_value(bowler) AS player, count(*) FILTER (WHERE bowler_wicket) AS wkts,
+                   count(*) FILTER (WHERE is_legal) AS balls, sum(bowler_runs) AS runs,
+                   round(6.0 * sum(bowler_runs) / count(*) FILTER (WHERE is_legal), 2) AS econ,
+                   round(100.0 * count(*) FILTER (WHERE is_legal AND runs_total = 0) / count(*) FILTER (WHERE is_legal), 1) AS dot_pct
+            FROM d WHERE {where}
+            GROUP BY bowler_id HAVING count(*) FILTER (WHERE is_legal) >= $min_balls
+            ORDER BY {'econ ASC' if sort == 'econ' else 'wkts DESC, econ ASC'} LIMIT $limit""")
+
+
+NO_DL = r"NOT regexp_matches(m.status_text, 'D/?L')"           # rain-revised targets are not like-for-like
+
+
+def results(q: "Q", a: argparse.Namespace) -> None:
+    """Match-level facts across every match: close wins, targets defended or chased, what a chase needed."""
+    q.params.update(v=a.value, over=a.over or 17)
+    totals = f"""t AS (SELECT match_id, sum(runs_total) FILTER (WHERE inning = 1) AS first,
+                        any_value(batting_team) FILTER (WHERE inning = 1) AS bat_first,
+                        any_value(batting_team) FILTER (WHERE inning = 2) AS chaser,
+                        sum(runs_total) FILTER (WHERE inning = 2 AND over_number < $over) AS before_over
+                 FROM d WHERE {YEARS} GROUP BY match_id)"""
+    if a.kind == "close_runs":
+        q.table(f"Matches won by fewer than {a.value} runs {q.span} (rain-revised results excluded)", f"""
+            SELECT m.start_date AS date, m.title, franchise(m.team1) AS team1, franchise(m.team2) AS team2, m.status_text AS result
+            FROM matches m WHERE year(m.start_date) BETWEEN $y0 AND $y1 AND {NO_DL}
+              AND TRY_CAST(regexp_extract(m.status_text, 'won by (\\d+) runs?', 1) AS INTEGER) < $v
+            ORDER BY m.start_date DESC LIMIT $limit""")
+        n = q.rows(f"""SELECT count(*) AS n FROM matches m WHERE year(m.start_date) BETWEEN $y0 AND $y1 AND {NO_DL}
+                       AND TRY_CAST(regexp_extract(m.status_text, 'won by (\\d+) runs?', 1) AS INTEGER) < $v""")[0]["n"]
+        q.note(f"{n} matches {q.span} were won by fewer than {a.value} runs (rain-revised results excluded).")
+    elif a.kind == "close_wickets":
+        n = q.rows(f"""SELECT count(*) AS n FROM matches m WHERE year(m.start_date) BETWEEN $y0 AND $y1 AND {NO_DL}
+                       AND TRY_CAST(regexp_extract(m.status_text, 'won by (\\d+) wickets?', 1) AS INTEGER) < $v""")[0]["n"]
+        q.note(f"{n} matches {q.span} were won by fewer than {a.value} wickets (rain-revised results excluded).")
+    elif a.kind == "tied":
+        q.table(f"Tied matches {q.span}", """
+            SELECT m.start_date AS date, m.title, franchise(m.team1) AS team1, franchise(m.team2) AS team2, m.status_text AS result
+            FROM matches m WHERE year(m.start_date) BETWEEN $y0 AND $y1 AND m.status_text ILIKE '%tied%'
+            ORDER BY m.start_date DESC LIMIT $limit""")
+        n = q.rows("SELECT count(*) AS n FROM matches m WHERE year(m.start_date) BETWEEN $y0 AND $y1 AND m.status_text ILIKE '%tied%'")[0]["n"]
+        q.note(f"{n} matches {q.span} ended in a tie.")
+    elif a.kind in ("defended_under", "chased_over"):
+        defended = a.kind == "defended_under"
+        cond = "t.first < $v AND franchise(m.winner) = t.bat_first" if defended else "t.first + 1 >= $v AND franchise(m.winner) = t.chaser"
+        who = "t.bat_first" if defended else "t.chaser"
+        label = f"Targets under {a.value} defended" if defended else f"Targets of {a.value} or more chased"
+        q.table(f"{label}, by team {q.span} (rain-revised results excluded)", f"""
+            WITH {totals}
+            SELECT {who} AS team, count(*) AS times, max(t.first) AS {'highest_defended' if defended else 'highest_target'},
+                   min(t.first) AS {'lowest_defended' if defended else 'lowest_target'}
+            FROM t JOIN matches m USING (match_id) WHERE {cond} AND {NO_DL}
+            GROUP BY 1 ORDER BY times DESC, team LIMIT $limit""")
+    elif a.kind == "needed_at_over":
+        q.table(f"Most runs still needed at the start of over {a.over or 17} in chases that were won {q.span} (rain-revised results excluded)", f"""
+            WITH {totals}
+            SELECT t.chaser AS team, t.first + 1 - coalesce(t.before_over, 0) AS needed, m.start_date AS date, m.status_text AS result
+            FROM t JOIN matches m USING (match_id) WHERE franchise(m.winner) = t.chaser AND {NO_DL}
+            ORDER BY needed DESC LIMIT $limit""")
+    else:
+        q.note(f"Unknown kind {a.kind!r}.")
+
+
+def milestone(q: "Q", a: argparse.Namespace) -> None:
+    """Fewest innings (or balls) to reach N runs or wickets."""
+    q.params["v"] = a.value
+    if a.stat == "runs":
+        q.table(f"Fewest innings to {a.value} IPL runs", """
+            WITH x AS (SELECT b.player, b.player_id, row_number() OVER w AS inns, sum(b.runs) OVER w AS cum, m.start_date
+                       FROM bat_inn b JOIN matches m USING (match_id)
+                       WINDOW w AS (PARTITION BY b.player_id ORDER BY m.start_date, b.match_id, b.inning))
+            SELECT any_value(player) AS player, min(inns) AS innings, min(start_date) FILTER (WHERE cum >= $v) AS reached_on
+            FROM x WHERE cum >= $v GROUP BY player_id ORDER BY innings, reached_on LIMIT $limit""")
+    elif a.by == "balls":
+        q.table(f"Fewest balls to {a.value} IPL wickets", """
+            WITH b AS (SELECT bowler, bowler_id, m.start_date, match_id, sequence,
+                              sum(CASE WHEN is_legal THEN 1 ELSE 0 END) OVER w AS balls,
+                              sum(CASE WHEN bowler_wicket THEN 1 ELSE 0 END) OVER w AS wkts
+                       FROM d JOIN matches m USING (match_id)
+                       WINDOW w AS (PARTITION BY bowler_id ORDER BY m.start_date, match_id, sequence ROWS UNBOUNDED PRECEDING))
+            SELECT any_value(bowler) AS player, min(balls) AS balls, min(start_date) AS reached_on
+            FROM b WHERE wkts >= $v GROUP BY bowler_id ORDER BY balls LIMIT $limit""")
+    else:
+        q.table(f"Fewest innings to {a.value} IPL wickets", """
+            WITH x AS (SELECT b.player, b.player_id, row_number() OVER w AS inns, sum(b.wickets) OVER w AS cum, m.start_date
+                       FROM bowl_inn b JOIN matches m USING (match_id)
+                       WINDOW w AS (PARTITION BY b.player_id ORDER BY m.start_date, b.match_id, b.inning))
+            SELECT any_value(player) AS player, min(inns) AS innings, min(start_date) FILTER (WHERE cum >= $v) AS reached_on
+            FROM x WHERE cum >= $v GROUP BY player_id ORDER BY innings, reached_on LIMIT $limit""")
+
+
+def player_match(q: "Q", a: argparse.Namespace) -> None:
+    """A player's Nth IPL match and what they did in it."""
+    resolved = _resolve_player(q, a.name)
+    if not resolved:
+        return
+    pid, name = resolved
+    q.params.update(pid=pid, n=a.nth)
+    games = q.rows("""
+        WITH g AS (SELECT DISTINCT match_id, team FROM (SELECT match_id, team FROM bat_inn WHERE player_id = $pid
+                   UNION ALL SELECT match_id, team FROM bowl_inn WHERE player_id = $pid))
+        SELECT g.match_id, g.team, m.start_date AS date, m.title, franchise(m.team1) AS team1, franchise(m.team2) AS team2,
+               m.status_text AS result, row_number() OVER (ORDER BY m.start_date, g.match_id) AS n
+        FROM g JOIN matches m USING (match_id) QUALIFY n = $n""")
+    if not games:
+        q.note(f"{name} has fewer than {a.nth} IPL matches in which he batted or bowled.")
+        return
+    g = games[0]
+    q.params["mid"] = g["match_id"]
+    q.show(f"{name}: IPL match number {a.nth}", [{k: g[k] for k in ("n", "date", "title", "team1", "team2", "result")}])
+    q.table(f"{name} in that match", """
+        SELECT 'batting' AS role, runs::VARCHAR AS figures, balls, fours AS "4s", sixes AS "6s" FROM bat_inn WHERE player_id = $pid AND match_id = $mid
+        UNION ALL SELECT 'bowling', wickets || '/' || conceded, balls, NULL, NULL FROM bowl_inn WHERE player_id = $pid AND match_id = $mid""")
+    q.note("Matches are counted where he batted or bowled; the archive has no playing XIs, so a game where he only fielded is not counted.")
 
 
 def matches(q: "Q", a: argparse.Namespace) -> None:
@@ -770,6 +915,23 @@ def build_parser() -> argparse.ArgumentParser:
     p = cmd("phase", phase, "Best batters or bowlers in a phase", min_balls=60)
     p.add_argument("phase", choices=["powerplay", "middle", "death"])
     p.add_argument("--role", choices=["bat", "bowl"], default="bat")
+    p = cmd("overs", overs, "Leaders in any over range and innings (e.g. overs 12-20 while chasing)", min_balls=60)
+    p.add_argument("--from", dest="from_over", type=int, required=True, help="first over, 1-20")
+    p.add_argument("--to", dest="to_over", type=int, help="last over (default: same as --from)")
+    p.add_argument("--innings", type=int, choices=[1, 2], help="1 = batting first, 2 = chasing")
+    p.add_argument("--role", choices=["bat", "bowl"], default="bat")
+    p.add_argument("--sort", choices=["sr", "runs", "econ", "wkts"])
+    p = cmd("results", results, "Match facts: close wins, targets defended or chased, runs needed at an over", limit=15)
+    p.add_argument("kind", choices=["close_runs", "close_wickets", "defended_under", "chased_over", "needed_at_over", "tied"])
+    p.add_argument("--value", type=int, default=0, help="the run or wicket threshold")
+    p.add_argument("--over", type=int, help="for needed_at_over: the over (default 17, i.e. the last 4 overs)")
+    p = cmd("milestone", milestone, "Fewest innings (or balls) to N runs or wickets", year=False, limit=10)
+    p.add_argument("stat", choices=["runs", "wickets"])
+    p.add_argument("value", type=int)
+    p.add_argument("--by", choices=["innings", "balls"], default="innings")
+    p = cmd("player-match", player_match, "A player's Nth IPL match and what they did in it", year=False)
+    p.add_argument("name")
+    p.add_argument("nth", type=int)
     p = cmd("matches", matches, "List matches (find match ids)", limit=100)
     p.add_argument("--team", help="team code, e.g. RCB")
     p.add_argument("--vs", help="opponent code, e.g. CSK")

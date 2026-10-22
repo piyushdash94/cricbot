@@ -111,7 +111,9 @@ def _team_entities(text: str, *, fuzzy: bool = True) -> tuple[list[str], list[di
 
 
 def _temporal_entities(text: str, current_year: int) -> tuple[list[int], str | None, list[dict[str, str]]]:
-    years = [int(value) for value in re.findall(r"\b20\d{2}\b", text)]
+    # An IPL season (2008 to now), and not a count: "2000 runs" and "3000 runs" are milestones, not years.
+    years = [int(m.group(0)) for m in re.finditer(r"\b20\d{2}\b(?!\s*(?:ipl\s+)?(?:runs?|wickets?|balls?|matches|sixes|fours))", text)
+             if 2008 <= int(m.group(0)) <= current_year]
     reference = None
     corrections: list[dict[str, str]] = []
     temporal_patterns = (
@@ -182,7 +184,12 @@ def resolve_entities(
     # With nothing named and nothing to carry, the question is about the match
     # on screen ("show me the ball-by-ball"), unless it moves to another season.
     visible = [str(team).upper() for team in (ui_context or {}).get("teams") or [] if team]
-    if not self_contained and not teams and not players and not years and len(visible) == 2:
+    # ...but not a question about all matches ("how many matches were won by under 5 runs?").
+    across_matches = bool(re.search(r"\bhow many (matches|times|games)\b|\bwhich (team|teams|player|bowler|batter)\b"
+                                    r"|\b(most|least|fewest|ever|all[- ]time|in ipl|ipl history)\b", text))
+    on_screen = bool(re.search(r"\b(this|that|the current) (match|game|innings|chase)\b", text))
+    if not self_contained and not teams and not players and not years and len(visible) == 2 \
+            and (on_screen or not across_matches):
         teams = visible
     topics = [topic for topic in TOPICS if _contains_phrase(text, topic)]
     intent, wants_all = _intent(text, teams, players)
