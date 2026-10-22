@@ -79,6 +79,20 @@ CREATE TABLE IF NOT EXISTS cricsheet_balls (
     short_text VARCHAR, commentary VARCHAR,
     PRIMARY KEY (match_id, inning, sequence)
 );
+-- Match facts Cricsheet records beside the balls: the toss, player of the match, who took each
+-- catch / stumping / run-out, and impact-player (and concussion) substitutions.
+CREATE TABLE IF NOT EXISTS cs_match_info (
+    match_id BIGINT PRIMARY KEY, toss_winner VARCHAR, toss_decision VARCHAR, method VARCHAR
+);
+CREATE TABLE IF NOT EXISTS cs_awards (match_id BIGINT, player_id BIGINT, player VARCHAR);
+CREATE TABLE IF NOT EXISTS cs_fielding (
+    match_id BIGINT, inning INTEGER, sequence BIGINT, fielder_id BIGINT, fielder VARCHAR, substitute BOOLEAN,
+    kind VARCHAR, player_out_id BIGINT, player_out VARCHAR
+);
+CREATE TABLE IF NOT EXISTS cs_subs (
+    match_id BIGINT, inning INTEGER, sequence BIGINT, team VARCHAR, player_in_id BIGINT, player_in VARCHAR,
+    player_out_id BIGINT, player_out VARCHAR, reason VARCHAR
+);
 CREATE TABLE IF NOT EXISTS players (
     player_id BIGINT, name VARCHAR, source VARCHAR, PRIMARY KEY (player_id, source)
 );

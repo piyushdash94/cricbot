@@ -809,12 +809,17 @@ class Q:
             raise NoDatabase(f"No database at {path}. Run `python -m backend.db.cricsheet_load --sync` first, or pass --db.")
         self.con = store.connect(path, read_only=True)
         tables = {r[0] for r in self.con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
-        self.con.execute(FRANCHISE_MACRO + source_views(tables) + VIEWS)
+        from .analytics import STATE_VIEWS
+        self.tables = tables
+        self.con.execute(FRANCHISE_MACRO + source_views(tables) + VIEWS + STATE_VIEWS)
         y0, y1 = parse_years(getattr(a, "year", None))
         self.span = "(all time)" if getattr(a, "year", None) is None else f"({a.year})"
         self.params: dict[str, Any] = {"y0": y0, "y1": y1, "limit": getattr(a, "limit", 15),
                                        "min_balls": getattr(a, "min_balls", 0) or 0}
         self.blocks: list[dict[str, Any]] = []
+
+    def has(self, table: str) -> bool:
+        return table in self.tables
 
     @staticmethod
     def team(code: str | None) -> str:
@@ -963,6 +968,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = cmd("player-match", player_match, "A player's Nth IPL match and what they did in it", year=False)
     p.add_argument("name")
     p.add_argument("nth", type=int)
+    from .analytics import register
+    register(cmd)
     p = cmd("matches", matches, "List matches (find match ids)", limit=100)
     p.add_argument("--team", help="team code, e.g. RCB")
     p.add_argument("--vs", help="opponent code, e.g. CSK")

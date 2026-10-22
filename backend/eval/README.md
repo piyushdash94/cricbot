@@ -271,3 +271,40 @@ unit tests, since the runner cannot set screen context yet.
 python -m backend.eval.run_qna --planner rules --dataset backend/eval/qna_ipl_traps.jsonl
 python -m backend.eval.run_qna --planner hybrid --answer --dataset backend/eval/qna_ipl_traps.jsonl
 ```
+
+## Slices and new families set (32 questions, `qna_ipl_v3_slices.jsonl`)
+
+Questions that need a filter, split or adjustment the older tools lacked, the new match facts, and
+three things the archive still cannot answer. Every gold answer comes from independent SQL on the
+raw tables (`deliveries`, `matches`, `cs_*`), not from the slice compiler, so the compiler is not
+grading itself; the hat-trick list was also checked against a published list (23 to 2025).
+
+| Group | Examples |
+|---|---|
+| Filters | finals / playoffs, chasing, won matches, at a ground, against a team, after winning the toss, last 4 overs of successful chases since 2023, a batter's first 10 balls |
+| Splits and trends | Kohli chasing vs batting first; death-overs run rate in a season |
+| Innings-level | highest score in a final; highest total while chasing |
+| Judgment words | "best finishers" (stated definition), "most ahead of his era" (season-adjusted index) |
+| New facts | hat-tricks, player of the match, toss, impact subs, partnerships, opening pairs |
+| Still gaps | spin or pace, batting hand, home grounds: the reply must say so |
+| Pairs | finals vs playoffs: the filter must change the answer |
+
+Building it found and fixed: a rain-revised (D/L) chase counted in a won-chase slice; D/L games
+dropped from a slice that does not depend on the target; "from 2008 to 2025" read as an open range;
+rivalry questions ("KKR against MI: who has won more?") taken as an opposition filter. The first LLM
+run (26/32) found planner argument errors that grounding now corrects: a split nobody asked for, a
+sum where one innings was asked for, a batter leaderboard for a league run rate, `"true"` sent as a
+string, and a team the question never named.
+
+Scores: rules 32/32 (development: these questions shaped the fixes). Hybrid planner with LLM-written
+answers: 26/32 on the first run, 31/32 after the grounding fixes, with 29 of 32 LLM answers passing the
+number check unchanged. The remaining miss crowned the second row of the table ("Ashutosh Sharma is
+the top finisher"): every name and number was real, the ranking was not. A rank check now requires
+the name a reply crowns to be the table's first (or tied-first) row, and a reply that omits a stated
+definition gets it prepended; on a recheck that answer fell back to the table summary. Groq's daily
+quota ran out mid-run, so 17 of 32 plans came from OpenRouter (Llama 3.3 70B).
+
+```bash
+python -m backend.eval.run_qna --planner rules --dataset backend/eval/qna_ipl_v3_slices.jsonl
+python -m backend.eval.run_qna --planner hybrid --answer --dataset backend/eval/qna_ipl_v3_slices.jsonl
+```

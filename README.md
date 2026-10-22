@@ -78,8 +78,14 @@ With the stats archive built (below), Pandit answers questions across matches as
 - "Best death bowlers in 2024", "Average first innings score at Chepauk", "Highest team total ever"
 - "What's the pitch like at Chepauk?" (ground report), "Rashid's IPL economy", "Bumrah vs Kohli"
 - "Pandya's batting record" asks which Pandya, with a button for each; "Most runs in WPL 2024" says it is outside the IPL archive
+- Any metric on any slice of balls: "Kohli's average in finals", "Kohli chasing vs batting first", "strike rate in the last
+  4 overs of successful chases since 2023", "best strike rate when the required rate is above 12", "economy after winning
+  the toss", "most runs at Wankhede", "highest score in an IPL final", "death-overs run rate by season"
+- Hat-tricks, player-of-the-match awards, the toss, impact-player substitutes, partnerships and opening pairs
+- Judgment words get a stated definition: "best finishers" = strike rate in overs 16-20 of won chases, shrunk toward the
+  league so a short hot streak cannot top the list; "most ahead of his era" = strike rate against the league that season
 
-The planner (LLM tool calling, with keyword rules as fallback) chooses archive queries, the tables appear under the answer, and the trace pane shows the plan and the commands. Single-match questions ("Where did the 2025 final turn?") still open the match.
+The planner (LLM tool calling, with keyword rules as fallback) chooses archive queries, the tables appear under the answer, and the trace pane shows the plan and the commands. A coverage guard checks that every filter the question states (finals, chasing, a ground, against a team, after winning the toss, ...) is applied by the plan; a call that cannot apply it is rewritten as a slice that can, or the reply names the filter it could not apply instead of answering a nearby question. Spin or pace, batting hand and home grounds are not in the archive yet, and Pandit says so. Single-match questions ("Where did the 2025 final turn?") still open the match.
 
 Accuracy is measured in [`backend/eval`](backend/eval/README.md) on 299 questions. Scores on questions the code was tuned on are high (v1 development 100%, v2 robustness set 100% with keyword rules and 98% with the Groq planner). The fair numbers are the first runs on held-out questions: v1 held-out 79% (keyword rules), 84% (Groq planner) and 92% (full app, Groq planning and writing); v2 held-out 79% for both planners. In the full-app run, 35 of 38 LLM-written answers kept every number from the tables; the other 3 were replaced by the table summary.
 
@@ -108,6 +114,10 @@ The Stats view (the **∑** button, or **Stats** on mobile) and `/api/stats/*` r
 ```bash
 python -m backend.db.cricsheet_load --sync     # ~20 s: downloads Cricsheet and loads every IPL delivery
 ```
+
+An archive built before October 2026 lacks the toss, player-of-the-match, fielding and impact-substitute tables: run
+`python -m backend.db.cricsheet_load` once (no download needed; it rebuilds only the Cricsheet tables, ESPN data is kept).
+Until then those questions say the data is not loaded.
 
 It covers season and all-time leaders (any sort, any team), records, powerplay / middle / death splits, player profiles, batter v bowler, venues, a ground report, champions, team seasons and head to head. The same queries run from the command line:
 
@@ -238,8 +248,10 @@ print(build_compact_scorecard(
 | `backend/agent/service.py` | LangGraph state, nodes, trace events, grounded responses, and UI actions |
 | `backend/agent/llm.py` | Groq/OpenRouter/Gemma provider chain, tool-call planning and `.env` loading |
 | `backend/agent/stats.py` | Stats questions: tool specs, planner (LLM + keyword rules), player index, query runner, facts and chat card |
+| `backend/agent/slices.py` | Planner side of slices: wording parser, slice/family rules, definitions for "best X", the coverage guard |
 | `backend/db/store.py` | DuckDB schema and fast typed bulk insert |
-| `backend/db/cricsheet_load.py` | Load Cricsheet deliveries and the people register |
+| `backend/db/cricsheet_load.py` | Load Cricsheet deliveries, the people register, and match facts (toss, player of the match, fielders, impact subs) |
+| `backend/db/analytics.py` | Slice compiler (any metric, filter, split; season-adjusted and shrunk rankings), match-state view, hat-tricks, toss, awards, impact subs, partnerships |
 | `backend/db/ingest.py`, `parse.py` | Ingest ESPN matches (scorecards, deliveries, commentary) through `cricdata` |
 | `backend/db/evaluate.py` | Check ball-by-ball data against the official scorecard |
 | `backend/db/queries.py` | Verified stats queries shared by the CLI, `/api/stats`, Pandit and the eval |
