@@ -119,6 +119,14 @@ An archive built before October 2026 lacks the toss, player-of-the-match, fieldi
 `python -m backend.db.cricsheet_load` once (no download needed; it rebuilds only the Cricsheet tables, ESPN data is kept).
 Until then those questions say the data is not loaded.
 
+Batting hand and bowling type (spin or pace) come from ESPN player profiles, which Cricsheet lacks:
+
+```bash
+python -m backend.db.player_styles --fetch 200   # ~8 min once: about 190 scorecards cover every IPL player
+```
+
+Without it, questions such as "Kohli against spin" or "best left-handed batter" say the styles are not loaded.
+
 It covers season and all-time leaders (any sort, any team), records, powerplay / middle / death splits, player profiles, batter v bowler, venues, a ground report, champions, team seasons and head to head. The **Explore** tab builds any slice (who, measure, filters, compare by) with presets such as best finishers, Kohli chasing vs batting first and death-overs run rate by season; **Stands** lists partnerships and pairs; Records adds player-of-the-match awards, hat-tricks and impact substitutes; Grounds adds the toss. The same queries run from the command line:
 
 ```bash
@@ -201,7 +209,8 @@ Share the HTTPS forwarding URL printed by ngrok. The single frontend tunnel also
 | `GET` | `/api/stats/matchup?batter=...&bowler=...` | Every ball a batter faced from a bowler |
 | `GET` | `/api/stats/h2h`, `/api/stats/teams/{code}`, `/api/stats/champions` | Head to head, team seasons, finals and titles |
 | `GET` | `/api/stats/venues`, `/api/stats/grounds/{name}` | Grounds; one ground against the league |
-| `GET` | `/api/stats/slice` | Any metric on any slice of balls: filters, splits, season-adjusted and sample-adjusted rankings, highest single innings |
+| `GET` | `/api/stats/slice` | Any metric on any slice of balls: filters (incl. `bowl_kind`, `bat_hand`, `venue_type`), splits, rank by career / season / match (`per`), season-adjusted and sample-adjusted rankings |
+| `GET` | `/api/stats/pitch/{match_id}`, `/home`, `/par` | One match's pitch profile; home and away records; runs and wickets per over against the season's par |
 | `GET` | `/api/stats/partnerships`, `/awards`, `/hattricks`, `/impact`, `/toss` | Stands and pairs, player of the match, hat-tricks, impact substitutes, the toss |
 | `GET` | `/api/live` | Fetch live matches through `cricdata` |
 | `GET` | `/api/matches/{series_slug}/{match_slug}` | Fetch the complete live match bundle |
@@ -251,6 +260,7 @@ print(build_compact_scorecard(
 | `backend/agent/llm.py` | Groq/OpenRouter/Gemma provider chain, tool-call planning and `.env` loading |
 | `backend/agent/stats.py` | Stats questions: tool specs, planner (LLM + keyword rules), player index, query runner, facts and chat card |
 | `backend/agent/slices.py` | Planner side of slices: wording parser, slice/family rules, definitions for "best X", the coverage guard |
+| `backend/db/player_styles.py` | Batting hand and bowling type from ESPN scorecards (cached; a greedy cover picks the fewest matches) |
 | `backend/db/store.py` | DuckDB schema and fast typed bulk insert |
 | `backend/db/cricsheet_load.py` | Load Cricsheet deliveries, the people register, and match facts (toss, player of the match, fielders, impact subs) |
 | `backend/db/analytics.py` | Slice compiler (any metric, filter, split; season-adjusted and shrunk rankings), match-state view, hat-tricks, toss, awards, impact subs, partnerships |
@@ -285,6 +295,7 @@ Pandit's accuracy (needs the DuckDB archive; the rules planner needs no LLM keys
 python -m backend.eval.run_qna --planner rules                                          # v1 development set
 python -m backend.eval.run_qna --planner rules --dataset backend/eval/qna_ipl_v2.jsonl  # v2 robustness set
 python -m backend.eval.run_qna --planner hybrid --dataset backend/eval/qna_ipl_v2.jsonl # with the LLM planner
+python -m backend.eval.run_qna --planner rules --dataset backend/eval/qna_ipl_v4_round.jsonl  # styles, units, home, counts
 ```
 
 All backend tests use synthetic Cricsheet- and ESPNcricinfo-shaped payloads and mocked LLM providers. The suite needs no network access and never calls Groq or OpenRouter.

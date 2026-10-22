@@ -40,6 +40,8 @@ at 2–3; more parallel requests trigger upstream 502s.
 | `players` | Display names per `player_id` from Cricsheet |
 | `innings_card`, `batting_card`, `bowling_card` | Scorecards rebuilt from `balls`; `cs_*` the same from `cricsheet_balls` |
 | `ingest_log` | ESPN ingest status per match: `ok`, `partial`, `no_balls`, `error` |
+| `player_styles` | Batting hand, bowling style, spin or pace, bowling arm per `player_id` (from ESPN scorecards; `player_styles.py`) |
+| `home_ground` (view) | Each team-season's home ground: its most-played venue with at least 4 games and a quarter of its matches (2009, 2020–2022 left out: neutral or bubble seasons) |
 
 Each delivery row has batter, bowler, runs split into bat / wides / no-balls / byes / leg
 byes, wicket and dismissal type, and a one-line description.
@@ -127,6 +129,7 @@ DuckDB allows one writer per file: run the loaders and `queries`/`evaluate` one 
 | `parse.py` | Pure parsing of ESPN play-by-play and the Cricinfo scorecard into rows |
 | `store.py` | DuckDB schema and views |
 | `evaluate.py` | Rebuilds scorecards from either source and reconciles them with the official card |
+| `player_styles.py` | Fetches the fewest ESPN scorecards that cover every player (greedy set cover) and stores their styles; re-runs only add |
 | `queries.py` | Stats commands, used by the CLI and by `backend/apis/stats.py` |
 | `read.py` | Returns a stored match in the API's match-detail shape (not wired into the API yet) |
 

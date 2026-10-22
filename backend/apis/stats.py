@@ -173,6 +173,9 @@ def slice_stats(
     wickets_in_hand: str | None = Query(None, pattern=r"^\d{1,2}-\d{1,2}$"),
     batter_balls: str | None = Query(None, pattern=r"^\d{1,3}-\d{1,3}$"),
     split: Literal[tuple(analytics.SPLITS)] | None = None,  # type: ignore[valid-type]
+    per: Literal["career", "season", "match"] | None = None,
+    bowl_kind: Literal["pace", "spin"] | None = None, bat_hand: Literal["left", "right"] | None = None,
+    venue_type: Literal["home", "away"] | None = None,
     adjust: bool = False, shrink: bool = False, order: Literal["best", "worst"] = "best",
     min_balls: int | None = Query(None, ge=0, le=5000), year: str | None = YEAR(), limit: int = Query(15, ge=1, le=30),
 ):
@@ -182,7 +185,9 @@ def slice_stats(
                 *_opt("--innings", innings), *_opt("--stage", stage), *_opt("--result", result), *_opt("--toss", toss),
                 *_opt("--venue", _ground(venue)), *_opt("--target-min", target_min), *_opt("--target-max", target_max),
                 *_opt("--rrr-min", rrr_min), *_opt("--rrr-max", rrr_max), *_opt("--wickets-in-hand", wickets_in_hand),
-                *_opt("--batter-balls", batter_balls), *_opt("--split", split), *(["--adjust"] if adjust else []),
+                *_opt("--batter-balls", batter_balls), *_opt("--split", split), *_opt("--per", per),
+                *_opt("--bowl-kind", bowl_kind), *_opt("--bat-hand", bat_hand), *_opt("--venue-type", venue_type),
+                *(["--adjust"] if adjust else []),
                 *(["--shrink"] if shrink else []), "--order", order, *_opt("--min-balls", min_balls),
                 *_opt("--year", year), "--limit", limit)
 
@@ -216,3 +221,20 @@ def impact(team: str | None = TEAM_FILTER(), sort: Literal["times", "runs", "wkt
 def toss(by: Literal["season", "venue", "team"] | None = None, venue: str | None = Query(None, **PLAYER_NAME),
          year: str | None = YEAR(), limit: int = Query(25, ge=1, le=60)):
     return _run("toss", *_opt("--by", by), *_opt("--venue", _ground(venue)), *_opt("--year", year), "--limit", limit)
+
+
+@router.get("/pitch/{match_id}")
+def pitch(match_id: int):
+    """How one match's pitch played against the league that season: phases, pace v spin, dismissals, commentary cues."""
+    return _run("pitch", match_id)
+
+
+@router.get("/home")
+def home(order: Literal["best", "worst"] = "best", year: str | None = YEAR(), limit: int = Query(20, ge=1, le=30)):
+    return _run("home", "--order", order, *_opt("--year", year), "--limit", limit)
+
+
+@router.get("/par")
+def par(year: str | None = YEAR()):
+    """League runs and wickets per innings for each over number (the par line on the over-by-over chart)."""
+    return _run("par", *_opt("--year", year))
