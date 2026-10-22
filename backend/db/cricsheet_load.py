@@ -12,6 +12,9 @@ Cricinfo scorecard and very recent matches.
 Player IDs: Cricsheet's register maps its own player ids to Cricinfo ids, the ids ESPN
 uses, so the same player has the same `player_id` in both sources.
 
+It also keeps the match facts Cricsheet records beside the balls: the toss, player of the match,
+the fielder on each catch / stumping / run-out, and impact-player substitutions (cs_* tables).
+
 Safe to re-run: the Cricsheet tables are rebuilt in one transaction.
 """
 
@@ -42,6 +45,12 @@ CRICSHEET_COLUMNS = (
     "is_wicket", "bowler_wicket", "dismissal_type", "player_out_id", "player_out",
     "short_text", "commentary",
 )
+INFO_COLUMNS = ("match_id", "toss_winner", "toss_decision", "method")
+AWARD_COLUMNS = ("match_id", "player_id", "player")
+FIELDING_COLUMNS = ("match_id", "inning", "sequence", "fielder_id", "fielder", "substitute", "kind",
+                    "player_out_id", "player_out")
+SUB_COLUMNS = ("match_id", "inning", "sequence", "team", "player_in_id", "player_in", "player_out_id",
+               "player_out", "reason")
 
 
 # ------------------------------------------------------------------- inputs
@@ -162,6 +171,38 @@ def match_balls(match_id: int, payload: dict[str, Any], register: dict[str, int]
     return rows
 
 
+def match_extras(match_id: int, payload: dict[str, Any], register: dict[str, int]) -> dict[str, list[dict[str, Any]]]:
+    """Toss, player of the match, fielders on each dismissal and match substitutions (impact players)."""
+    info = payload.get("info") or {}
+    people = (info.get("registry") or {}).get("people") or {}
+    pid = lambda name: player_id(people.get(name), register)    # noqa: E731
+    toss = info.get("toss") or {}
+    out: dict[str, list[dict[str, Any]]] = {
+        "info": [{"match_id": match_id, "toss_winner": team_code(toss["winner"]) if toss.get("winner") else "",
+                  "toss_decision": toss.get("decision", ""), "method": (info.get("outcome") or {}).get("method", "")}],
+        "awards": [{"match_id": match_id, "player_id": pid(name), "player": name} for name in info.get("player_of_match") or []],
+        "fielding": [], "subs": []}
+    for inning, inn in enumerate(payload.get("innings") or [], 1):
+        for over in inn.get("overs") or []:
+            over_number = int(over["over"]) + 1
+            for position, d in enumerate(over.get("deliveries") or [], 1):
+                sequence = inning * 100000 + over_number * 100 + position     # the same key as match_balls
+                for w in d.get("wickets") or []:
+                    for f in w.get("fielders") or []:
+                        if f.get("name"):
+                            out["fielding"].append({
+                                "match_id": match_id, "inning": inning, "sequence": sequence,
+                                "fielder_id": pid(f["name"]), "fielder": f["name"], "substitute": bool(f.get("substitute")),
+                                "kind": (w.get("kind") or "").lower(), "player_out_id": pid(w.get("player_out")),
+                                "player_out": w.get("player_out", "")})
+                for r in (d.get("replacements") or {}).get("match") or []:
+                    out["subs"].append({
+                        "match_id": match_id, "inning": inning, "sequence": sequence, "team": team_code(r.get("team", "")),
+                        "player_in_id": pid(r.get("in")), "player_in": r.get("in", ""),
+                        "player_out_id": pid(r.get("out")), "player_out": r.get("out", ""), "reason": r.get("reason", "")})
+    return out
+
+
 def match_row(match_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     info = payload.get("info") or {}
     teams = [team_code(t) for t in info.get("teams") or []] + ["", ""]
@@ -204,12 +245,15 @@ def load(db_path: str | Path | None = None, directory: Path | None = None, downl
         raise SystemExit(f"No Cricsheet files in {directory}. Run: python -m backend.src.cricsheet sync")
     register = load_register(download=download_register)
     balls, matches, names = [], [], {}
+    extras: dict[str, list[dict[str, Any]]] = {"info": [], "awards": [], "fielding": [], "subs": []}
     for path in files:
         payload = json.loads(path.read_text(encoding="utf-8"))
         match_id = int(path.stem)
         matches.append(match_row(match_id, payload))
         rows = match_balls(match_id, payload, register)
         balls.extend(rows)
+        for key, part in match_extras(match_id, payload, register).items():
+            extras[key].extend(part)
         for r in rows:
             for pid_key, name_key in (("batter_id", "batter"), ("bowler_id", "bowler"), ("player_out_id", "player_out")):
                 if r[pid_key] is not None:
@@ -220,6 +264,10 @@ def load(db_path: str | Path | None = None, directory: Path | None = None, downl
     try:
         con.execute("DELETE FROM cricsheet_balls")
         _bulk_insert(con, "cricsheet_balls", CRICSHEET_COLUMNS, balls)
+        for table, cols, key in (("cs_match_info", INFO_COLUMNS, "info"), ("cs_awards", AWARD_COLUMNS, "awards"),
+                                 ("cs_fielding", FIELDING_COLUMNS, "fielding"), ("cs_subs", SUB_COLUMNS, "subs")):
+            con.execute(f"DELETE FROM {table}")
+            _bulk_insert(con, table, cols, extras[key])
         # Match rows only fill gaps: a row from the ESPN fixture list (with its cricdata paths) wins.
         new = [m for m in matches if m["match_id"] not in
                {r[0] for r in con.execute("SELECT match_id FROM matches").fetchall()}]
@@ -232,6 +280,7 @@ def load(db_path: str | Path | None = None, directory: Path | None = None, downl
         con.execute("ROLLBACK")
         raise
     counts = {"matches": len(files), "deliveries": len(balls), "new_match_rows": len(new),
+              "awards": len(extras["awards"]), "fielding": len(extras["fielding"]), "subs": len(extras["subs"]),
               "players": len(names), "players_with_cricinfo_id": sum(1 for k in names if k > 0)}
     con.close()
     return counts

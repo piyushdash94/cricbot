@@ -44,6 +44,9 @@ Rules:
 - State facts as facts: never refer to the tables themselves ("the table shows", "as shown in").
 - Write every number as digits ("5 times", not "five times"), so each one can be checked.
 - If several players or teams share the top value, say they are tied and name them all.
+- If a "Definition:" note is given, state the definition in one short clause (it is what "best" was taken to mean).
+- A "(shrunk)" column is the sample-adjusted value used for ranking: name the raw value too. An "index" column: 100 is
+  the league average for the same balls that season; quote the index itself, do not turn it into a percentage.
 - At most five sentences. Plain text, no markdown tables or headings."""
 
 
