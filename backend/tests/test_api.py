@@ -25,9 +25,13 @@ def setUpModule():
 
     empty = tempfile.mkdtemp(prefix="cricbot-test-")
     _PATCHES.extend([
+        # No stats archive either (so a local DuckDB file cannot change the route), and no live LLM planning
+        # (a backend/.env with keys must not make these tests call Groq).
         patch.dict(os.environ, {"CRICSHEET_DIR": os.path.join(empty, "cricsheet"),
-                                "CRICBOT_CACHE_DIR": os.path.join(empty, "cache")}),
+                                "CRICBOT_CACHE_DIR": os.path.join(empty, "cache"),
+                                "CRICBOT_DB": os.path.join(empty, "none.duckdb")}),
         patch.object(ipl_data, "_client", side_effect=ConnectionError("offline (test)")),
+        patch.object(agent.llm, "plan", side_effect=RuntimeError("offline (test)")),
     ])
     for p in _PATCHES:
         p.start()
