@@ -491,3 +491,132 @@ def test_graph_answers_a_follow_up_from_history(db):
     first = next(e for e in result["trace"] if e["node"] == "normalize_request")
     assert "rewritten" in first["summary"] and "2025" in first["summary"]
     assert result["cards"][0]["type"] == "stats" and "sixes" in result["reply"]
+
+
+# ----------------------------------------------------------------- gaps and traps (answer safety)
+
+def test_new_queries_run_on_the_fixture(db):
+    blocks = queries.run(["overs", "--from", "16", "--to", "20", "--innings", "2", "--min-balls", "1"], db=db)
+    assert blocks[0]["title"].startswith("Batters by strike rate in overs 16-20, second innings")
+    assert queries.run(["overs", "--from", "1", "--role", "bowl", "--sort", "wkts", "--min-balls", "1"], db=db)[0]["rows"]
+    assert queries.run(["results", "close_runs", "--value", "50"], db=db)[-1]["type"] == "text"
+    assert queries.run(["results", "defended_under", "--value", "300"], db=db)[0]["columns"][0] == "team"
+    assert "Fewest innings" in queries.run(["milestone", "runs", "10"], db=db)[0]["title"]
+    played = queries.run(["player-match", "Ishan Kishan", "1"], db=db)
+    assert played[0]["title"].endswith("IPL match number 1") and "playing XIs" in played[-1]["text"]
+
+
+@pytest.mark.parametrize("question, tool, args", [
+    ("who has the highest strike rate in overs 12-20 in second innings?", "over_range_leaders",
+     {"from_over": 12, "to_over": 20, "innings": 2, "role": "bat"}),
+    ("who has taken the most wickets in the 1st over of the innings?", "over_range_leaders",
+     {"from_over": 1, "to_over": 1, "role": "bowl", "sort": "wkts"}),
+    ("in how many matches was the win margin less than 5 runs ?", "match_results", {"kind": "close_runs", "value": 5}),
+    ("which team has defended targets under 130 the most in IPL?", "match_results", {"kind": "defended_under", "value": 130}),
+    ("has any team chased more than 100 runs required in the last 4 overs of chase?", "match_results",
+     {"kind": "needed_at_over", "over": 17}),
+    ("who has bowled the least balls to take 100 ipl wickets?", "milestones", {"stat": "wickets", "value": 100, "by": "balls"}),
+    ("how many matches have ended in a tie?", "match_results", {"kind": "tied"}),
+])
+def test_rule_planner_reaches_the_new_queries(question, tool, args):
+    calls = stats.rule_plan(question, resolve_entities(question), None)
+    assert calls and calls[0]["name"] == tool and args.items() <= calls[0]["args"].items()
+
+
+def test_milestones_take_every_value_and_years_ignore_run_counts():
+    q = "who was the fastest to 2000, 3000 runs in all time history?"
+    assert [c["args"]["value"] for c in stats.rule_plan(q, resolve_entities(q), None)] == [2000, 3000]
+    assert resolve_entities(q)["years"] == []                       # 2000 runs is not the 2000 season
+    assert resolve_entities("most runs in 2016")["years"] == [2016]
+
+
+def test_gaps_are_named_instead_of_answering_a_nearby_question():
+    assert stats.capability_gaps("who has taken the most hattricks for MI?", []) == ["hat-tricks"]
+    assert stats.capability_gaps("highest strike rate in overs 12-20", [{"name": "phase_leaders", "args": {}}]) \
+        == ["these specific overs"]
+    assert stats.capability_gaps("highest strike rate in overs 12-20", [{"name": "over_range_leaders", "args": {}}]) == []
+    assert stats.capability_gaps("best death bowlers in 2024", [{"name": "phase_leaders", "args": {}}]) == []
+    assert stats.is_aggregate("in how many matches was the margin under 5 runs") and not stats.is_aggregate("where did this match turn")
+
+
+def test_on_screen_teams_stay_with_questions_about_that_match():
+    ui = {"teams": ["KKR", "PBKS"]}
+    assert resolve_entities("Where did it turn?", ui_context=ui)["teams"] == ["KKR", "PBKS"]
+    assert resolve_entities("who scored the most runs in this match?", ui_context=ui)["teams"] == ["KKR", "PBKS"]
+    assert resolve_entities("in how many matches was the win margin less than 5 runs?", ui_context=ui)["teams"] == []
+
+
+def test_graph_says_so_when_no_query_covers_a_whole_ipl_question(db):
+    from backend.agent.service import CricbotAgent
+
+    result = CricbotAgent(llm=FakeRouter(fail_plan=True)).answer("who has taken the most hat-tricks in the IPL?")
+    assert result["reply"].startswith("I can't answer that yet") and "hat-tricks" in result["reply"]
+    assert result["tool_calls"] == [] and result["cards"][0]["type"] == "scope"
+
+
+def test_checks_reject_invented_names_wrong_winners_and_one_name_for_a_tie(monkeypatch):
+    from backend.agent.service import CricbotAgent
+
+    index = stats.PlayerIndex.build([stats.Player(1, "Trent Boult", 100, 10, 100), stats.Player(2, "Ajit Chandila", 12, 2, 12),
+                                     stats.Player(3, "Bhuvneshwar Kumar", 150, 40, 150)])
+    monkeypatch.setattr(stats, "player_index", lambda: index)
+    monkeypatch.setattr(stats, "available", lambda: True)
+    facts = "Bowlers by wickets in over 1: Trent Boult 32, Bhuvneshwar Kumar 31"
+    assert CricbotAgent._names_are_grounded("Trent Boult has 32.", facts, "most wickets in over 1")
+    assert not CricbotAgent._names_are_grounded("Ajit Chandila has 10.", facts, "most wickets in over 1")
+    card = {"type": "match", "match": {"status_text": "KKR won by 3 wickets", "teams": [{"abbr": "KKR"}, {"abbr": "PBKS"}]}}
+    assert not CricbotAgent._result_is_consistent("The collapse handed the win to Punjab.", [card])
+    assert CricbotAgent._result_is_consistent("Punjab's late burst could not stop KKR, who won by 3 wickets.", [card])
+    block = {"type": "table", "title": "Most hundreds", "columns": ["player", "100s"],
+             "rows": [["David Warner", 2], ["Abhishek Sharma", 2], ["Jonny Bairstow", 1]]}
+    results = [{"name": "batting_leaders", "args": {"sort": "hundreds"}, "blocks": [block]}]
+    assert stats.top_tie(results) == ["David Warner", "Abhishek Sharma"]
+    assert not stats.mentions_tie("David Warner has the most hundreds, 2.", results)
+    assert stats.mentions_tie("Warner and Abhishek Sharma are tied on 2 hundreds.", results)
+    assert "are tied on hundreds 2" in stats.summary(results, "most centuries")
+
+
+def test_number_check_reads_formatted_numbers_and_dates():
+    from backend.agent.service import CricbotAgent
+
+    facts = "Fewest innings to 1000 IPL runs: Shaun Marsh 21, reached_on 2011-05-02"
+    assert CricbotAgent._numbers_are_grounded("Shaun Marsh reached 1,000 runs in 21 innings on 2 May 2011.", facts, "")
+    assert not CricbotAgent._numbers_are_grounded("Shaun Marsh reached 1,000 runs in 19 innings.", facts, "")
+
+
+def test_llm_innings_filter_needs_the_question_to_ask_for_it():
+    q = "who has taken the most wickets in the 1st over of the innings?"
+    kept, _ = stats.ground_calls([{"name": "over_range_leaders", "args": {"from_over": 1, "innings": 1, "role": "bowl"}}],
+                                 q, resolve_entities(q))
+    assert "innings" not in kept[0]["args"]
+    q = "best strike rate in overs 12-20 while chasing"
+    kept, _ = stats.ground_calls([{"name": "over_range_leaders", "args": {"from_over": 12, "innings": 2, "role": "bat"}}],
+                                 q, resolve_entities(q))
+    assert kept[0]["args"]["innings"] == 2
+
+
+def test_precise_rules_win_and_unanswerable_gaps_skip_the_queries(db):
+    from backend.agent.service import CricbotAgent
+
+    rules = [{"name": "match_results", "args": {"kind": "needed_at_over", "over": 17}}]
+    assert stats.prefer_rules([{"name": "match_results", "args": {"kind": "chased_over", "value": 100}}], rules)
+    assert not stats.prefer_rules(rules, rules)
+    result = CricbotAgent(llm=FakeRouter([{"name": "records", "args": {}}])).answer("who has taken the most hat-tricks?")
+    assert result["reply"].startswith("I can't answer that yet") and result["tool_calls"] == []
+
+
+def test_a_reply_without_numbers_is_not_an_answer_when_tables_have_rows():
+    from backend.agent.service import CricbotAgent
+
+    state = {"route": "stats", "gaps": [], "stats_results": [{"blocks": [{"type": "table", "rows": [["Dwayne Bravo", 39]]}]}]}
+    assert CricbotAgent._is_non_answer("The tables do not contain data on the last over.", state)
+    assert not CricbotAgent._is_non_answer("Dwayne Bravo has 39 wickets in the last over.", state)
+    assert not CricbotAgent._is_non_answer("I can't break this down by these specific overs.", {**state, "gaps": ["x"]})
+    note = {"route": "stats", "gaps": [], "stats_results": [{"blocks": [{"type": "text", "text": "5 matches were won by fewer than 2 wickets."}]}]}
+    assert CricbotAgent._is_non_answer("The tables do not provide that number.", note)
+
+
+def test_last_n_overs_comes_from_the_question():
+    q = "has any team chased more than 100 runs required in the last 4 overs of chase?"
+    kept, _ = stats.ground_calls([{"name": "match_results", "args": {"kind": "needed_at_over", "over": 16}}], q, resolve_entities(q))
+    assert kept[0]["args"]["over"] == 17

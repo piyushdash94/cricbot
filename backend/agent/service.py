@@ -43,6 +43,7 @@ Rules:
   "strike rate", "economy", "in all".
 - State facts as facts: never refer to the tables themselves ("the table shows", "as shown in").
 - Write every number as digits ("5 times", not "five times"), so each one can be checked.
+- If several players or teams share the top value, say they are tied and name them all.
 - At most five sentences. Plain text, no markdown tables or headings."""
 
 
@@ -76,6 +77,7 @@ class PanditState(TypedDict, total=False):
     model: str
     route: str
     planner: str
+    gaps: list[str]
     stats_calls: list[dict[str, Any]]
     stats_results: list[dict[str, Any]]
 
@@ -293,10 +295,22 @@ class CricbotAgent:
                     "intermediate_message": f"Out of scope ({topic}); answering with what the archive covers."}
         calls, planner, note = stats.plan(query, state.get("entities", {}), self.llm, state.get("history"), index,
                                           mode=os.environ.get("PANDIT_PLANNER", "hybrid"))
+        gaps = stats.capability_gaps(query, calls)
+        entities = state.get("entities", {})
+        one_match = bool(entities.get("match_terms")) or len(entities.get("teams") or []) == 2 or stats.ON_SCREEN.search(query.casefold())
+        if (not calls and (gaps or (stats.is_aggregate(query) and not one_match))) or set(gaps) & stats.UNANSWERABLE:
+            # A whole-IPL question with no query to answer it: say so, rather than count from a list of 10 matches.
+            what = gaps or ["AGGREGATE"]
+            return {"route": "scope", "planner": planner, "stats_calls": [], "results": [], "gaps": what,
+                    "compact_results": "", "match_target": None,
+                    "cards": [{"type": "scope", "title": "Not in the archive yet",
+                               "topic": " and ".join(what) if gaps else "no query covers this yet",
+                               "message": stats.gap_reply(what, False), "suggestions": stats.SCOPE_SUGGESTIONS}],
+                    "intermediate_message": f"No query answers this ({' and '.join(what)}); saying so instead of guessing."}
         route = "stats" if calls else "match"
         described = "; ".join(f"{c['name']}({', '.join(f'{k}={v}' for k, v in (c.get('args') or {}).items() if v not in (None, ''))})" for c in calls)
         return {
-            "route": route, "planner": planner, "stats_calls": calls,
+            "route": route, "planner": planner, "stats_calls": calls, "gaps": gaps,
             "intermediate_message": (f"{planner} planned {described}." if calls
                                      else f"{note} Routed to the match path.".strip()),
         }
@@ -305,6 +319,9 @@ class CricbotAgent:
     def _run_stats(state: PanditState) -> PanditState:
         results = stats.run_calls(state.get("stats_calls", []))
         facts = stats.facts_text(results)
+        if state.get("gaps"):
+            facts = (f"NOTE: the question asks for {' and '.join(state['gaps'])}, which these tables do not break down. "
+                     f"Say that in the first sentence, then give the closest answer the tables have.\n") + facts
         tables = sum(1 for r in results for b in r["blocks"] if b["type"] == "table")
         errors = [r["error"] for r in results if r["error"]]
         return {
@@ -433,8 +450,14 @@ class CricbotAgent:
             candidate,
             state["compact_results"],
             state["query"],
-        )
+        ) and self._names_are_grounded(candidate, state["compact_results"], state["query"]) \
+            and stats.mentions_tie(candidate, state.get("stats_results") or []) \
+            and not self._is_non_answer(candidate, state) \
+            and self._result_is_consistent(candidate, state.get("cards") or [])
         reply = self._limit_sentences(candidate) if grounded else self._grounded_fallback(state)
+        gaps = state.get("gaps") or []
+        if gaps and state.get("route") == "stats" and not re.search(r"can.?t|cannot|not (yet|broken|available)|doesn.?t|closest", reply, re.I):
+            reply = stats.gap_reply(gaps, True) + reply          # never present a nearby answer as the answer
         return {
             "reply": reply,
             "model_used": grounded,
@@ -444,7 +467,8 @@ class CricbotAgent:
 
     def _grounded_fallback(self, state: PanditState) -> str:
         if state.get("route") == "scope":
-            return stats.scope_reply(state["cards"][0]["topic"])
+            card = state["cards"][0]
+            return card.get("message") or stats.scope_reply(card["topic"])
         if state.get("route") == "stats":
             return stats.summary(state.get("stats_results", []), state.get("query", ""))
         cards = state.get("cards") or []
@@ -674,8 +698,53 @@ class CricbotAgent:
             return value
 
     @staticmethod
+    def _is_non_answer(reply: str, state: PanditState) -> bool:
+        """A stats reply with no number although the tables have rows ("the tables do not contain...")."""
+        if state.get("route") != "stats" or state.get("gaps") or re.search(r"\d", reply):
+            return False
+        return any((b["type"] == "table" and b["rows"]) or (b["type"] == "text" and not r.get("error") and re.search(r"\d", b["text"]))
+                   for r in state.get("stats_results") or [] for b in r["blocks"])
+
+    @staticmethod
+    def _names_are_grounded(reply: str, facts: str, message: str) -> bool:
+        """Every player the reply names must appear in the facts or the question (catches invented names)."""
+        if not stats.available():
+            return True
+        try:
+            named = stats.player_index().scan(reply)[0]
+        except Exception:
+            return True
+        source = stats._norm(f"{facts} {message}")
+        return all(any(f" {key} " in f" {source} " for key in stats._name_keys(p.name)) for p in named)
+
+    @staticmethod
+    def _result_is_consistent(reply: str, cards: list[dict[str, Any]]) -> bool:
+        """A match answer must not hand the win to the team that lost."""
+        match = next((c.get("match") for c in cards if c.get("type") == "match"), None)
+        if not match:
+            return True
+        status = str(match.get("status_text") or "")
+        teams = [str(t.get("abbr") or "").upper() for t in match.get("teams") or []]
+        won = re.match(r"\s*(.+?) won\b", status)
+        if not won or len(teams) != 2:
+            return True
+        winner = next((t for t in teams if t == stats.queries.Q.team(won.group(1)) or t in stats._teams(won.group(1).casefold())), None)
+        if not winner:
+            return True
+        loser = next(t for t in teams if t != winner)
+        for sentence in re.split(r"(?<=[.!?])\s+", reply):
+            low = sentence.casefold()
+            if re.search(r"\b(win|won|victory|triumph|clinch\w*|seal\w*)\b", low):
+                named = set(stats._teams(low)) | {t for t in teams if re.search(rf"\b{t.casefold()}\b", low)}
+                if loser in named and winner not in named:
+                    return False
+        return True
+
+    @staticmethod
     def _numbers_are_grounded(reply: str, facts: str, message: str) -> bool:
         def numbers(value: str) -> set[float]:
+            value = re.sub(r"(?<=\d),(?=\d{3}\b)", "", value)      # 1,000 -> 1000
+            value = re.sub(r"(?<=\d)[-/](?=\d)", " ", value)        # 2011-05-02 -> 2011 05 02, not negatives
             return {float(token) for token in re.findall(r"[+-]?\d+(?:\.\d+)?", value)}
 
         return numbers(reply).issubset(numbers(f"{facts}\n{message}"))

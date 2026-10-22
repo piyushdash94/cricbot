@@ -78,6 +78,20 @@ TOOLS: list[dict[str, Any]] = [
     _fn("ground_report", "One ground's character against the league: par score by season, phase scoring, how "
         "wickets fall, chasing (pitch / conditions questions).",
         {"name": {"type": "string", "description": "ground or nickname"}, "year": YEAR_PARAM}, ["name"]),
+    _fn("over_range_leaders", "Leaders for ANY over range and innings (over 1; overs 12-20; chasing = innings 2, "
+        "batting first = innings 1).", {
+            "from_over": {"type": "integer"}, "to_over": {"type": "integer"},
+            "innings": {"type": "integer", "enum": [1, 2]}, "role": {"type": "string", "enum": ["bat", "bowl"]},
+            "sort": {"type": "string", "enum": ["sr", "runs", "econ", "wkts"]}, "year": YEAR_PARAM}, ["from_over", "role"]),
+    _fn("match_results", "Facts across all matches: close wins (close_runs, close_wickets), targets defended "
+        "(defended_under) or chased (chased_over), runs still needed at an over in won chases (needed_at_over).", {
+            "kind": {"type": "string", "enum": ["close_runs", "close_wickets", "defended_under", "chased_over", "needed_at_over", "tied"]},
+            "value": {"type": "integer"}, "over": {"type": "integer"}, "year": YEAR_PARAM}, ["kind"]),
+    _fn("milestones", "Fewest innings (or balls) to reach N runs or wickets.", {
+            "stat": {"type": "string", "enum": ["runs", "wickets"]}, "value": {"type": "integer"},
+            "by": {"type": "string", "enum": ["innings", "balls"]}}, ["stat", "value"]),
+    _fn("player_match", "A player's Nth IPL match and what they did in it.",
+        {"name": PLAYER_PARAM, "nth": {"type": "integer"}}, ["name", "nth"]),
     _fn("season_summary", "Per season: matches, run rate, average first innings, highest total, total sixes.",
         {"year": YEAR_PARAM}),
 ]
@@ -408,6 +422,38 @@ def to_argv(call: dict[str, Any], index: PlayerIndex | None = None) -> list[str]
         return ["venues", *([ground] if ground else []), *_year(args), "--limit", "10"]
     if name == "season_summary":
         return ["seasons", *_year(args)]
+    if name == "over_range_leaders":
+        lo = _int(args, "from_over", 1, 20) or 1
+        hi = _int(args, "to_over", lo, 20) or lo
+        role = args.get("role") if args.get("role") in ("bat", "bowl") else "bat"
+        sort = args.get("sort") if args.get("sort") in (("sr", "runs") if role == "bat" else ("econ", "wkts")) else None
+        innings = _int(args, "innings", 1, 2)
+        balls = _int(args, "min_balls", 0, 5000)
+        if balls is None:                             # a fair sample for the width of the range
+            span = hi - lo + 1
+            balls = 60 if span <= 2 else 150 if span <= 6 else 300
+        return ["overs", "--from", str(lo), "--to", str(hi), "--role", role, *(["--sort", sort] if sort else []),
+                *(["--innings", str(innings)] if innings else []), *_year(args), "--min-balls", str(balls), "--limit", "10"]
+    if name == "match_results":
+        kind = args.get("kind")
+        if kind not in ("close_runs", "close_wickets", "defended_under", "chased_over", "needed_at_over", "tied"):
+            raise PlanError("kind must be close_runs, close_wickets, defended_under, chased_over, needed_at_over or tied")
+        value = _int(args, "value", 0, 400) or {"close_runs": 5, "close_wickets": 2, "defended_under": 130,
+                                                  "chased_over": 200, "needed_at_over": 0, "tied": 0}[kind]
+        over = _int(args, "over", 2, 20)
+        return ["results", kind, "--value", str(value), *(["--over", str(over)] if over else []), *_year(args), "--limit", "10"]
+    if name == "milestones":
+        stat = args.get("stat") if args.get("stat") in ("runs", "wickets") else "runs"
+        value = _int(args, "value", 1, 20000)
+        if not value:
+            raise PlanError("milestones needs a value, e.g. 2000 runs")
+        by = "balls" if args.get("by") == "balls" else "innings"
+        return ["milestone", stat, str(value), "--by", by, "--limit", "10"]
+    if name == "player_match":
+        nth = _int(args, "nth", 1, 500)
+        if not nth:
+            raise PlanError("player_match needs nth, e.g. 100")
+        return ["player-match", _player(args.get("name"), index or player_index())[0], str(nth)]
     if name == "ground_report":
         ground = str(args.get("name") or "").strip()
         ground = GROUND_ALIASES.get(ground.casefold(), ground)
@@ -513,6 +559,79 @@ def contextualize(question: str, history: list[dict[str, str]] | None, index: Pl
     return out if out != base else question
 
 
+# ----------------------------------------------------------------- gaps
+
+# Questions the archive cannot answer yet. Each says what is missing, so the reply can say so instead of
+# answering a nearby question ("overs 12-20" is not "the death overs").
+UNSUPPORTED = [
+    (r"hat[- ]?tricks?", "hat-tricks"),
+    (r"(man|player) of the (match|series|tournament)|\bpotm\b|\bmotm\b|\bawards?\b", "awards such as player of the match"),
+    (r"\bcatch(es)?\b|\bfielders?\b|\bfielding\b|\bstumpings?\b|\brun[- ]outs? by\b",
+     "fielding (catches, stumpings and run outs are not loaded yet)"),
+    (r"\bwinning (side|team)\b|\bpart of (a |the )?winning\b", "team results in the matches a player played"),
+    (r"\bspeed\b|\bfastest (ball|delivery)\b|\bkph\b|km/h|\bmph\b", "ball speed"),
+]
+OVER_RANGE = re.compile(r"\bovers?\s*(\d{1,2})\s*(?:-|to|and|–)\s*(\d{1,2})\b|\b(\d{1,2})(?:st|nd|rd|th)\s+over\b"
+                        r"|\b(first|last|final)\s+over\b")
+INNINGS = re.compile(r"\b(second|2nd|first|1st)\s+innings\b|\bchas(e|es|ing)\b|\bbatting (first|second)\b|\bdefend")
+AGGREGATE = re.compile(r"\bhow many (matches|times|games|teams|players|seasons)\b"
+                       r"|\bwhich (team|teams|player|players|bowler|batter|side)\b"
+                       r"|\b(most|least|fewest|highest|lowest|record|ever|all[- ]time)\b|\bipl history\b|\bin (the )?ipl\b")
+
+
+UNANSWERABLE = {label for _, label in UNSUPPORTED}      # no query can stand in for these
+
+
+def capability_gaps(question: str, calls: list[dict[str, Any]]) -> list[str]:
+    """What the question asks for that the planned queries cannot provide."""
+    text = question.casefold()
+    gaps = [label for pattern, label in UNSUPPORTED if re.search(pattern, text)]
+    names = {c["name"] for c in calls}
+    if OVER_RANGE.search(text) and not names & {"over_range_leaders", "match_results"} \
+            and not _phase_in(text.replace("-", " ")):
+        gaps.append("these specific overs")
+    if INNINGS.search(text) and not names & {"over_range_leaders", "match_results"} \
+            and names - {"player_profile", "batter_vs_bowler", "head_to_head", "team_seasons", "champions", "ground_report", "venue_stats"}:
+        gaps.append("one innings (batting first or chasing)")
+    return gaps
+
+
+def top_tie(results: list[dict[str, Any]]) -> list[str]:
+    """Names sharing the top value of the first leaderboard, or [] when there is a single leader."""
+    for result in results:
+        key = _key_column(result)
+        block = next((b for b in result.get("blocks", []) if b["type"] == "table" and b["rows"]), None)
+        if not key or not block or key not in block["columns"] or block["columns"][0] not in ("player", "team"):
+            continue
+        i = block["columns"].index(key)
+        tied = [r[0] for r in block["rows"] if r[i] == block["rows"][0][i]]
+        return tied if len(tied) > 1 else []
+    return []
+
+
+def mentions_tie(reply: str, results: list[dict[str, Any]]) -> bool:
+    """False when the table has a tie at the top and the reply crowns one name."""
+    return not top_tie(results) or bool(re.search(r"\b(tie|tied|share|shared|joint|level|equal)\b", reply, re.I))
+
+
+def is_aggregate(question: str) -> bool:
+    """A question about many matches, which a list of 10 matches cannot answer."""
+    text = question.casefold()
+    return bool(AGGREGATE.search(text)) and not ON_SCREEN.search(text)
+
+
+def gap_reply(gaps: list[str], has_tables: bool) -> str:
+    what = " and ".join(gaps)
+    if has_tables:
+        return f"I can't break this down by {what} yet, so here is the closest the archive has. "
+    if what == "AGGREGATE":
+        return ("I can't answer that one yet: none of my archive queries covers it, and I won't guess from a sample of "
+                "matches. I can answer stats across every IPL match (leaders by over range or innings, milestones, "
+                "close finishes, players, grounds), or open any match.")
+    return (f"I can't answer that yet: the archive doesn't cover {what}. I can answer stats across every IPL match "
+            f"(leaders by over range or innings, milestones, close finishes, players, grounds), or open any match.")
+
+
 # ----------------------------------------------------------------- scope
 
 SCOPE_RULES: list[tuple[str, str]] = [
@@ -592,6 +711,8 @@ def _key_column(result: dict[str, Any]) -> str | None:
         return BOWL_KEY.get(args.get("sort") or "wkts")
     if result["name"] == "phase_leaders":
         return "econ" if args.get("role") == "bowl" else "sr"
+    if result["name"] == "over_range_leaders":
+        return args.get("sort") or ("econ" if args.get("role") == "bowl" else "sr")
     if result["name"] == "champions":
         return "champion"
     return None
@@ -666,6 +787,20 @@ def summary(results: list[dict[str, Any]], question: str = "") -> str:
         if not rows:
             parts.append(f"{block['title']}: no rows.")
             continue
+        if result["name"] == "player_match" and block and block["rows"]:
+            row = dict(zip(block["columns"], block["rows"][0]))
+            mine = next((b for b in result["blocks"] if b["type"] == "table" and b is not block), None)
+            did = "; ".join(f"{r[0]} {r[1]} ({r[2]} balls)" for r in (mine or {}).get("rows", []))
+            parts.append(f"{block['title']}: {row.get('date')}, {row.get('team1')} v {row.get('team2')} "
+                         f"({row.get('result')})" + (f" — {did}." if did else "."))
+            continue
+        if result["name"] == "match_results" and (result.get("args") or {}).get("kind") in ("close_runs", "close_wickets", "tied") and notes:
+            parts.append(notes[0])
+            continue
+        if result["name"] == "player_profile" and _has(text, "teams", "franchise", "franchises", "played for") \
+                and any("played for" in n for n in notes):
+            parts.append(next(n for n in notes if "played for" in n))
+            continue
         if result["name"] == "ground_report" and notes:
             parts.append(notes[-1])
             continue
@@ -714,6 +849,11 @@ def summary(results: list[dict[str, Any]], question: str = "") -> str:
         record_col = next((c for c in ("score", "figures", "balls_to_50", "6s") if c in cols), None)
         column = key if key in cols else (asked_col or record_col or cols[1])
         top = [f"{r[0]} ({_label(column)} {r[cols.index(column)]})" for r in rows[:3]]
+        best = rows[0][cols.index(column)]
+        tied = [r[0] for r in rows if r[cols.index(column)] == best]
+        if len(tied) > 1:                              # "Warner has the most" is wrong when three share the top
+            parts.append(f"{block['title']}: {', '.join(tied[:-1])} and {tied[-1]} are tied on {_label(column)} {best}.")
+            continue
         parts.append(f"{block['title']}: " + ", then ".join(top) + ".")
     return " ".join(parts) or "The archive has no rows for that question."
 
@@ -750,7 +890,10 @@ who won IPL 2019 -> champions(year=2019) | how many titles has CSK won -> team_s
 Bumrah's wickets -> player_profile(Jasprit Bumrah) | sixes hit in IPL 2024 -> season_summary(year=2024)
 highest total at the Kotla -> venue_stats(name=Kotla) | most runs 2008 to 2025 -> batting_leaders(year=2008-2025)
 Orange Cap = batting_leaders sort runs; Purple Cap = bowling_leaders sort wkts; maximums = sixes; scalps = wickets.
-first six overs = powerplay, overs 16-20 = death (phase_leaders; "who bowled best" -> role=bowl). Keep the question's year."""
+first six overs = powerplay, overs 16-20 = death (phase_leaders; "who bowled best" -> role=bowl). Keep the question's year.
+Other over ranges or one innings -> over_range_leaders (overs 12-20 chasing -> from_over=12, to_over=20, innings=2).
+fastest to 2000 runs -> milestones | Rohit's 100th match -> player_match | won by under 5 runs -> match_results.
+If no tool answers exactly, call none: never substitute a different question."""
 
 
 def llm_plan(router: Any, question: str, history: list[dict[str, str]] | None = None) -> tuple[list[dict[str, Any]], str, str]:
@@ -877,6 +1020,13 @@ def ground_calls(calls: list[dict[str, Any]], question: str, entities: dict[str,
         if missing:
             dropped.append(f"{call['name']}({', '.join(missing)})")
             continue
+        if args.get("innings") and not re.search(r"\b(second|2nd|first|1st)\s+innings\b|\bchas|\bbatting (first|second)\b"
+                                                 r"|\bdefend|\btarget", question.casefold()):
+            args.pop("innings")                       # "the 1st over of the innings" is not "the first innings"
+        last = re.search(r"\b(?:last|final)\s+(\d|two|three|four|five|six)\s+overs\b", question.casefold())
+        if last and call["name"] == "match_results" and args.get("kind") == "needed_at_over":
+            k = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6}.get(last.group(1)) or int(last.group(1))
+            args["over"] = 21 - k                     # "last 4 overs" starts at over 17, whatever the planner said
         year = str(args.get("year") or "").strip()
         if not year and years and call["name"] in YEAR_TOOLS:
             args["year"] = _year_arg(years)["year"]          # the planner dropped the question's year
@@ -901,6 +1051,10 @@ def prefer_rules(llm_calls: list[dict[str, Any]], rule_calls: list[dict[str, Any
     looked_at = {str(v).casefold() for c in llm_calls if c["name"] in player_tools
                  for k, v in (c.get("args") or {}).items() if k in ("name", "batter", "bowler")}
     surnames = {n.split()[-1] for n in looked_at if n.split()}
+    precise = {"over_range_leaders", "match_results", "milestones", "player_match"}
+    if rule_calls[0]["name"] in precise and [(c["name"], (c.get("args") or {}).get("kind")) for c in llm_calls] != \
+            [(c["name"], (c.get("args") or {}).get("kind")) for c in rule_calls]:
+        return True                                   # over numbers, margins and milestones: the explicit rule wins
     if named and any(n.split()[-1] not in surnames for n in named if n.split()):
         return True                                   # the question names a player the LLM plan never looks at
     if any(c["name"] == "batter_vs_bowler" for c in rule_calls) and not any(c["name"] == "batter_vs_bowler" for c in llm_calls):
@@ -983,7 +1137,8 @@ def rule_plan(question: str, entities: dict[str, Any], index: PlayerIndex | None
     players, ambiguous = index.scan(question) if index else ([], [])
     leader = _has(text, *LEADER_WORDS) or re.search(r"\brecord (team|individual|innings|score|total)", text) is not None
 
-    if _has(text, "who won the ipl", "won the ipl", "ipl champion", *TITLE_WORDS) or re.search(r"who won (the )?ipl", text):
+    if _has(text, "who won the ipl", "won the ipl", "ipl champion", *TITLE_WORDS) or re.search(r"who won (the )?ipl", text) \
+            or re.search(r"\bwon (the )?(\d{4} )?(edition|season|tournament|competition)\b", text):
         if teams and _has(text, "how many", "number of", "count", *TITLE_WORDS):
             return [{"name": "team_seasons", "args": {"team": teams[0], **year}}]
         return [{"name": "champions", "args": year}]
@@ -994,6 +1149,58 @@ def rule_plan(question: str, entities: dict[str, Any], index: PlayerIndex | None
         return [{"name": "batter_vs_bowler", "args": {"batter": players[0].name, "bowler": players[1].name, **year}}]
     if len(players) >= 2 and _has(text, "compare", "better", "comparison"):
         return [{"name": "player_profile", "args": {"name": p.name, **year}} for p in players[:2]]
+    # Milestones and Nth match ("fastest to 2000 runs", "least balls to 100 wickets", "Rohit's 100th match").
+    mile = re.search(r"\b(fastest|quickest|least|fewest|soonest)\b(.*?)\b(runs|wickets)\b", text)
+    values = [int(v) for v in re.findall(r"\b(\d{2,5})\b", mile.group(2))] if mile else []
+    if mile and values:                                # "fastest to 2000, 3000 runs": one query per milestone
+        by = "balls" if _has(text, "balls", "deliveries") else "innings"
+        return [{"name": "milestones", "args": {"stat": mile.group(3), "value": v, "by": by}} for v in values[:MAX_CALLS]]
+    if len(players) == 1 and _has(text, "teams", "team", "franchise", "franchises", "played for", "represented"):
+        return [{"name": "player_profile", "args": {"name": players[0].name}}]     # its note lists his teams
+    nth = re.search(r"\b(\d{1,3})(?:st|nd|rd|th)\s+(?:ipl\s+)?(?:match|game)\b", text)
+    if nth and len(players) == 1:
+        return [{"name": "player_match", "args": {"name": players[0].name, "nth": int(nth.group(1))}}]
+    # Close finishes and targets.
+    margin = re.search(r"\b(?:less|fewer)\s+than\s+(\d{1,3})\s+(runs?|wickets?)\b|\b(?:under|below)\s+(\d{1,3})\s+(runs?|wickets?)\b"
+                       r"|\bby\s+(\d)\s+(runs?|wickets?)\b", text)
+    if margin and _has(text, "won", "win", "wins", "margin", "matches", "games"):
+        g = margin.groups()
+        value, unit = (int(g[0]), g[1]) if g[0] else (int(g[2]), g[3]) if g[2] else (int(g[4]) + 1, g[5])
+        return [{"name": "match_results", "args": {"kind": "close_runs" if unit.startswith("run") else "close_wickets",
+                                                   "value": value, **year}}]
+    target = re.search(r"\b(?:under|below|less than)\s+(\d{2,3})\b", text)
+    if target and _has(text, "defend", "defended", "defending"):
+        return [{"name": "match_results", "args": {"kind": "defended_under", "value": int(target.group(1)), **year}}]
+    last = re.search(r"\b(?:last|final)\s+(\d|three|four|five)\s+overs\b", text)
+    if last and _has(text, "chase", "chased", "chasing", "required", "needed"):
+        k = {"three": 3, "four": 4, "five": 5}.get(last.group(1)) or int(last.group(1))
+        return [{"name": "match_results", "args": {"kind": "needed_at_over", "over": 21 - k, **year}}]
+    chased = re.search(r"\b(?:over|above|more than|at least)\s+(\d{3})\b|\b(\d{3})\s*(?:or more|plus|\+)", text)
+    if chased and _has(text, "chased", "chase", "chasing"):
+        return [{"name": "match_results", "args": {"kind": "chased_over", "value": int(chased.group(1) or chased.group(2)), **year}}]
+    if _has(text, "tied", "tie", "ties", "super over", "super overs") and _has(text, "how many", "matches", "games", "times"):
+        return [{"name": "match_results", "args": {"kind": "tied", **year}}]
+    # Any over range or one innings: "overs 12-20 in the second innings", "the 1st over".
+    rng = OVER_RANGE.search(question.casefold())
+    if rng and not players and (leader or _has(text, "strike rate", "economy", "wickets", "runs")):
+        if rng.group(1):
+            lo, hi = int(rng.group(1)), int(rng.group(2))
+        elif rng.group(3):
+            lo = hi = int(rng.group(3))
+        else:
+            lo = hi = 1 if rng.group(4) == "first" else 20
+        inn = 2 if re.search(r"\b(second|2nd) innings\b|\bchas", text) else \
+            1 if re.search(r"\b(first|1st) innings\b|\bbatting first\b", text) else None
+        standard = {(1, 6): "powerplay", (7, 15): "middle", (16, 20): "death"}.get((min(lo, hi), max(lo, hi)))
+        if standard and not inn:
+            rng = None                                # exactly a phase: the phase rule below answers it
+    if rng and not players and (leader or _has(text, "strike rate", "economy", "wickets", "runs")):
+        bowl = _has(text, "wickets", "economy", "economical", "bowler", "bowlers", "bowled")
+        sort = ("wkts" if _has(text, "wickets") else "econ") if bowl else \
+            ("runs" if _has(text, "runs") and not _has(text, "strike rate") else "sr")
+        return [{"name": "over_range_leaders", "args": {"from_over": min(lo, hi), "to_over": max(lo, hi),
+                                                        "role": "bowl" if bowl else "bat", "sort": sort,
+                                                        **({"innings": inn} if inn else {}), **year}}]
     phase = next((PHASES[w] for w in sorted(PHASES, key=len, reverse=True) if _has(text, w)), None) \
         or next((name for pattern, name in PHASE_OVERS if pattern.search(text)), None)
     one_player = len(players) == 1 and not leader      # "Dhoni's strike rate at the death" is his profile, not a ranking
