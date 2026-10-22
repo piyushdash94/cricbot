@@ -743,7 +743,7 @@ def test_rule_planner_reaches_slices_and_families(question, tool, args):
 def test_definitions_are_stated():
     q = "who are the best finishers in the IPL?"
     calls = stats.rule_plan(q, resolve_entities(q), None)
-    assert [c["args"]["metric"] for c in calls] == ["strike_rate", "average"] and calls[0]["definition"].startswith("Finisher =")
+    assert [c["args"]["metric"] for c in calls] == ["strike_rate", "runs"] and calls[0]["definition"].startswith("Finisher =")
     results = [{**calls[0], "blocks": [{"type": "table", "title": "t", "columns": ["batter", "strike rate (shrunk)"],
                                        "rows": [["AB de Villiers", 202.7]]}]}]
     assert stats.summary(results, q).startswith("Finisher =")

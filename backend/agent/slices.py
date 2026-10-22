@@ -265,19 +265,19 @@ def _evaluative(text: str) -> bool:
 DEFINITIONS = [
     (r"\b(?:best|greatest|top|ipl's best|ideal)\s+finishers?\b|\bfinishers?\b",
      "Finisher = batting in overs 16-20 of chases that were won. Ranked by strike rate, shrunk toward the league "
-     "so a short hot streak cannot top it; average in the same situation is the second view.",
+     "so a short hot streak cannot top it; total runs in the same situation is the second view.",
      [{"subject": "batter", "metric": "strike_rate", "overs": "16-20", "innings": 2, "result": "won", "shrink": True,
        "min_balls": 60},
-      {"subject": "batter", "metric": "average", "overs": "16-20", "innings": 2, "result": "won", "min_balls": 60}]),
+      {"subject": "batter", "metric": "runs", "overs": "16-20", "innings": 2, "result": "won"}]),
     (r"\b(?:biggest|best|cleanest|most destructive)\s+(?:six[- ]hitters?|hitters?|power[- ]hitters?)\b|\bpower[- ]hitters?\b",
      "Six-hitting = sixes per 100 balls faced, shrunk toward the league (min 120 balls); total sixes is the second view.",
      [{"subject": "batter", "metric": "six_pct", "shrink": True, "min_balls": 120},
       {"subject": "batter", "metric": "sixes"}]),
     (r"\bunder pressure\b|\bpressure (?:chases|situations)\b|\bin (?:tight|tough) chases\b",
      "Pressure = chasing when the required rate is above 10 an over. Ranked by strike rate, shrunk toward the league "
-     "(min 60 balls); average is the second view.",
+     "(min 60 balls); total runs in those situations is the second view.",
      [{"subject": "batter", "metric": "strike_rate", "innings": 2, "rrr_min": 10, "shrink": True, "min_balls": 60},
-      {"subject": "batter", "metric": "average", "innings": 2, "rrr_min": 10, "min_balls": 60}]),
+      {"subject": "batter", "metric": "runs", "innings": 2, "rrr_min": 10}]),
 ]
 
 

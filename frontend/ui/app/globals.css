@@ -404,7 +404,7 @@ code { font:12px var(--font-geist-mono); }
 /* Stats tabs scroll sideways on narrow screens instead of squeezing labels. */
 .stats-panel .detail-tabs { overflow-x:auto; scrollbar-width:none; }
 .stats-panel .detail-tabs::-webkit-scrollbar { display:none; }
-.stats-panel .detail-tabs button { flex:1 0 auto; padding:0 12px; white-space:nowrap; }
+.stats-panel .detail-tabs button { flex:1 0 auto; padding:0 9px; white-space:nowrap; }
 .stats-year select:disabled { opacity:.6; }
 .stats-controls { gap:10px; }
 .stats-controls label { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
@@ -439,3 +439,23 @@ code { font:12px var(--font-geist-mono); }
 .stats-h2h select { min-width:0; max-width:100%; flex:0 1 auto; }
 .stats-card .card-title { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:4px 12px; }
 .stats-card .card-title small { color:var(--muted); font-size:11px; }
+
+/* Stats: definitions, Explore (slice builder), trend bars */
+.stats-definition { margin:0; padding:7px 10px; border-left:3px solid var(--green); border-radius:0 7px 7px 0; background:var(--panel2); color:var(--ink); font-size:12px; line-height:1.45; }
+.stats-definition b { margin-right:6px; color:var(--green); font-size:11px; letter-spacing:.04em; text-transform:uppercase; }
+.stats-subhead { margin:6px 2px 0; }
+.explore-presets { gap:6px; }
+.explore-presets button:hover { border-color:var(--green); color:var(--green); }
+.explore-form .innings-filter { border-top:0; }
+.explore-form input:not([type="checkbox"]) { height:30px; padding:0 7px; border:1px solid var(--line2); border-radius:8px; color:var(--ink); background:var(--panel); font-size:12px; }
+.explore-form input[type="checkbox"] { accent-color:var(--green); }
+.trend-chart { display:grid; gap:4px; }
+.trend-row { display:grid; grid-template-columns:42px 1fr 52px; align-items:center; gap:8px; font-size:12px; }
+.trend-row>span { color:var(--muted); font-family:var(--font-geist-mono); }
+.trend-row b { text-align:right; font:600 12px var(--font-geist-mono); }
+.trend-row .par-track::after { display:none; }
+.explore-note { margin:8px 14px 0; }
+.explore-form input::placeholder { color:var(--faint); font-style:italic; }
+.explore-form select { max-width:100%; }
+.explore-form label { max-width:100%; }
+.stats-card .table-wrap td,.stats-card .table-wrap th { white-space:nowrap; }

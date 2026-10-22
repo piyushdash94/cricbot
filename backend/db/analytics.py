@@ -365,8 +365,10 @@ def slice_stats(q: Any, a: argparse.Namespace) -> None:
                          + (f"{round(k)} balls' worth" if k != float("inf") else "all of it (no real spread)")
                          + " (empirical Bayes), so a short hot streak cannot top the list; ranked by the shrunk value.")
     rank_key = "index" if a.adjust and den else ("shrunk" if any("shrunk" in r for r in out) else "value")
+    # An average over one or two dismissals is noise (183 from a single out): a ranking needs 3.
+    min_outs = 1 if (a.player or subject not in ("batter", "bowler")) else 3
     out = [r for r in out if r["value"] is not None and (r[sample_col] or 0) >= (min_sample or 0)
-           and (den != "W" or (r["W"] or 0) > 0)]
+           and (den != "W" or (r["W"] or 0) >= min_outs)]
     better_high = higher if a.order == "best" else not higher
     out.sort(key=lambda r: (r.get(rank_key) is None, -(r.get(rank_key) or 0) if better_high else (r.get(rank_key) or 0)))
     if split and (subject == "league" or names.get("players")):
@@ -375,11 +377,12 @@ def slice_stats(q: Any, a: argparse.Namespace) -> None:
     # ---- table
     who = {"batter": "batter", "bowler": "bowler", "batting_team": "team", "bowling_team": "team", "league": "IPL"}[subject]
     bits = describe(a, names)
-    sample_txt = f" (min {min_sample} balls)" if min_sample and den else ""
+    sample_txt = (f" (min {min_sample} balls" + (f", {min_outs} dismissals" if den == "W" and min_outs > 1 else "") + ")") \
+        if min_sample and den else (f" (min {min_outs} dismissals)" if den == "W" and min_outs > 1 else "")
     focus = f"{names['players']}: " if names.get("players") else ""
     noun = {"batter": "Batters", "bowler": "Bowlers", "batting_team": "Teams batting", "bowling_team": "Teams bowling",
             "league": "All IPL"}[subject]
-    title = (f"{focus}{label}" if focus or subject == "league" else f"{noun} by {label}") \
+    title = (f"{focus}{label}" if focus else f"IPL {label}" if subject == "league" else f"{noun} by {label}") \
         + (f" by {split}" if split else "") + (" - " + ", ".join(bits) if bits else "") + f" {q.span}{sample_txt}"
     fmt = lambda v: round(v, 2) if isinstance(v, float) else v      # noqa: E731
     records = []

@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 
-from backend.db import queries, store
+from backend.db import analytics, queries, store
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
@@ -145,3 +145,74 @@ def team(code: str, year: str | None = YEAR()):
     if not code.isalpha() or not 2 <= len(code) <= 6:
         raise HTTPException(status_code=422, detail="team code must be 2-6 letters, e.g. CSK")
     return _run("team", code, *_opt("--year", year))
+
+
+# ----------------------------------------------------------------- slices and match facts (backend/db/analytics.py)
+
+def _ground(name: str | None) -> str | None:
+    from backend.agent.stats import GROUND_ALIASES
+
+    return GROUND_ALIASES.get(name.casefold().strip(), name) if name else None
+
+
+PLAYER_NAME = {"min_length": 2, "max_length": 60}
+
+
+@router.get("/slice")
+def slice_stats(
+    subject: Literal["batter", "bowler", "batting_team", "bowling_team", "league"] = "batter",
+    metric: Literal[tuple(analytics.METRICS)] = "runs",  # type: ignore[valid-type]
+    player: str | None = Query(None, **PLAYER_NAME), vs: str | None = Query(None, **PLAYER_NAME),
+    team: str | None = TEAM_FILTER(), opp: str | None = TEAM_FILTER(),
+    overs: str | None = Query(None, pattern=r"^\d{1,2}(-\d{1,2})?$"),
+    phase: Literal["powerplay", "middle", "death"] | None = None, innings: int | None = Query(None, ge=1, le=2),
+    stage: Literal["final", "playoff"] | None = None, result: Literal["won", "lost"] | None = None,
+    toss: Literal["won", "lost"] | None = None, venue: str | None = Query(None, **PLAYER_NAME),
+    target_min: int | None = Query(None, ge=1, le=400), target_max: int | None = Query(None, ge=1, le=400),
+    rrr_min: float | None = Query(None, ge=0, le=36), rrr_max: float | None = Query(None, ge=0, le=36),
+    wickets_in_hand: str | None = Query(None, pattern=r"^\d{1,2}-\d{1,2}$"),
+    batter_balls: str | None = Query(None, pattern=r"^\d{1,3}-\d{1,3}$"),
+    split: Literal[tuple(analytics.SPLITS)] | None = None,  # type: ignore[valid-type]
+    adjust: bool = False, shrink: bool = False, order: Literal["best", "worst"] = "best",
+    min_balls: int | None = Query(None, ge=0, le=5000), year: str | None = YEAR(), limit: int = Query(15, ge=1, le=30),
+):
+    """Any metric on any slice of balls: the same compiler Pandit uses (see backend/db/analytics.py)."""
+    return _run("slice", "--subject", subject, "--metric", metric, *_opt("--player", player), *_opt("--vs", vs),
+                *_opt("--team", team), *_opt("--opp", opp), *_opt("--overs", overs), *_opt("--phase", phase),
+                *_opt("--innings", innings), *_opt("--stage", stage), *_opt("--result", result), *_opt("--toss", toss),
+                *_opt("--venue", _ground(venue)), *_opt("--target-min", target_min), *_opt("--target-max", target_max),
+                *_opt("--rrr-min", rrr_min), *_opt("--rrr-max", rrr_max), *_opt("--wickets-in-hand", wickets_in_hand),
+                *_opt("--batter-balls", batter_balls), *_opt("--split", split), *(["--adjust"] if adjust else []),
+                *(["--shrink"] if shrink else []), "--order", order, *_opt("--min-balls", min_balls),
+                *_opt("--year", year), "--limit", limit)
+
+
+@router.get("/partnerships")
+def partnerships(by: Literal["single", "pair"] = "single", wicket: int | None = Query(None, ge=1, le=10),
+                 team: str | None = TEAM_FILTER(), innings: int | None = Query(None, ge=1, le=2), year: str | None = YEAR(),
+                 limit: int = Query(10, ge=1, le=50)):
+    return _run("partnerships", "--by", by, *_opt("--wicket", wicket), *_opt("--team", team),
+                *_opt("--innings", innings), *_opt("--year", year), "--limit", limit)
+
+
+@router.get("/awards")
+def awards(team: str | None = TEAM_FILTER(), player: str | None = Query(None, **PLAYER_NAME), year: str | None = YEAR(),
+           limit: int = Query(10, ge=1, le=50)):
+    return _run("awards", *_opt("--team", team), *_opt("--player", player), *_opt("--year", year), "--limit", limit)
+
+
+@router.get("/hattricks")
+def hattricks(team: str | None = TEAM_FILTER(), year: str | None = YEAR()):
+    return _run("hattricks", *_opt("--team", team), *_opt("--year", year))
+
+
+@router.get("/impact")
+def impact(team: str | None = TEAM_FILTER(), sort: Literal["times", "runs", "wkts"] = "times", year: str | None = YEAR(),
+           limit: int = Query(10, ge=1, le=50)):
+    return _run("impact", *_opt("--team", team), "--sort", sort, *_opt("--year", year), "--limit", limit)
+
+
+@router.get("/toss")
+def toss(by: Literal["season", "venue", "team"] | None = None, venue: str | None = Query(None, **PLAYER_NAME),
+         year: str | None = YEAR(), limit: int = Query(25, ge=1, le=60)):
+    return _run("toss", *_opt("--by", by), *_opt("--venue", _ground(venue)), *_opt("--year", year), "--limit", limit)

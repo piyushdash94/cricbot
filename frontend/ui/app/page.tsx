@@ -439,7 +439,7 @@ export default function Home() {
   const llmLabel = agent?.provider ? `${agent.provider} · ${agent.model}` : agent ? "LLM offline · grounded recaps" : "Checking model…";
   const suggestions = selected
     ? ["Where did this match turn?", "Summarise the chase", "Who bowled the best spell?", "What happened in the last over?"]
-    : [`Tell me about the ${season} final`, `Most sixes in IPL ${season}`, "Kohli against Bumrah", "What's the pitch like at Chepauk?"];
+    : [`Tell me about the ${season} final`, `Most sixes in IPL ${season}`, "Kohli chasing vs batting first", "Who are the best finishers in the IPL?"];
 
   return (
     <div className={`app ${dark ? "dark" : "light"} view-${mobileView}${selected ? " has-match" : ""}${showStats ? " stats-open" : ""}`}>

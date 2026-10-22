@@ -192,6 +192,24 @@ def test_stats_api_endpoints(api):
     assert api.get("/api/stats/records", params={"limit": 1}).json()["blocks"][0]["rows"][0][1] == "286/6"
 
 
+def test_stats_api_slices_and_match_facts(api):
+    get = lambda path, **params: api.get(f"/api/stats/{path}", params=params)    # noqa: E731
+    best = get("slice", subject="batter", metric="high_score").json()["blocks"][0]
+    assert best["rows"][0][:2] == ["Ishan Kishan", "106*"]
+    split = get("slice", subject="batter", metric="runs", player="Ishan Kishan", split="innings").json()["blocks"][0]
+    assert split["columns"][:3] == ["batter", "innings", "runs"] and split["rows"][0][2] == 106
+    assert get("slice", metric="economy").json()["blocks"][0]["text"].startswith("'economy' is not")
+    assert get("slice", overs="death").status_code == 422 and get("slice", innings=3).status_code == 422
+    chase = get("slice", metric="runs", innings=2, result="lost", shrink=1, min_balls=0)  # query values arrive as strings
+    assert chase.status_code == 200 and "chasing" in chase.json()["blocks"][0]["title"]
+    assert get("partnerships", innings=1, by="pair").status_code == 200
+    assert get("partnerships", limit=1).json()["blocks"][0]["rows"][0][1] == 111
+    assert get("hattricks").json()["blocks"][-1]["text"].startswith("0 hat-tricks")
+    assert get("awards").json()["blocks"][0]["rows"][0][:2] == ["Ishan Kishan", 1]
+    assert {r[0] for r in get("impact").json()["blocks"][0]["rows"]} == {"Adam Zampa", "Sanju Samson"}   # ESPN full names
+    assert get("toss").json()["blocks"][0]["rows"][0][1] == 1                  # one match with a result
+
+
 def test_stats_api_validation_and_missing_database(api, monkeypatch, tmp_path):
     assert api.get("/api/stats/batting", params={"year": "20x5"}).status_code == 422
     assert api.get("/api/stats/h2h", params={"team1": "MI"}).status_code == 422

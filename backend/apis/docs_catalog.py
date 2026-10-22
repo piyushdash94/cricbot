@@ -42,6 +42,8 @@ def docs_catalog():
             {"method": "GET", "path": "/api/stats/phase", "use": "Best batters or bowlers in the powerplay, middle or death overs", "request": "phase, role, year, min_balls, limit", "response": "{ blocks }"},
             {"method": "GET", "path": "/api/stats/players?q= | /players/{player_id}", "use": "Find a player; season-by-season and phase splits", "request": "q / player_id, year", "response": "{ blocks }"},
             {"method": "GET", "path": "/api/stats/h2h", "use": "Head-to-head results between two teams", "request": "team1, team2, year", "response": "{ blocks }"},
+            {"method": "GET", "path": "/api/stats/slice", "use": "Any metric on any slice of balls (the compiler Pandit uses): filters, splits, season-adjusted index, sample-adjusted ranking, highest single innings", "request": "subject, metric, player, vs, team, opp, overs, phase, innings, stage, result, toss, venue, target_min/max, rrr_min/max, wickets_in_hand, batter_balls, split, adjust, shrink, order, min_balls, year, limit", "response": "{ blocks }"},
+            {"method": "GET", "path": "/api/stats/partnerships | /awards | /hattricks | /impact | /toss", "use": "Stands and pairs; player of the match; hat-tricks; impact substitutes; toss decisions and outcomes", "request": "year, team and per-endpoint options (wicket, by, innings; player; sort; by, venue)", "response": "{ blocks }"},
         ],
         "tools": [
             {"name": "entity resolver", "owner": "extract_entities", "use": "Resolve team typos, players, years, match stages, venues, conversational carry-over, and list intent"},
